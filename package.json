@@ -1,0 +1,24 @@
+{
+  "name": "chat-service",
+  "version": "0.0.0",
+  "description": "Chat message service for persona-nexus platform",
+  "main": "src/app.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node src/app.js",
+    "test": "jest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/adapter-libsql": "^5.21.0",
+    "@prisma/client": "^5.21.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.21.0"
+  }
+}
