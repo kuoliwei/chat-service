@@ -37,8 +37,8 @@ Content-Type: application/json
 ### 【場景 3】發送第一條訊息 - 用戶發言
 ### 替換 <CONVERSATION_ID> 為上一步返回的對話 ID
 ### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_alice_001
+POST http://localhost:6000/api/v1/conversations/cmqsykzs20000asaw9wf79i18/messages
+x-user-id: usr_1782187401507
 Content-Type: application/json
 
 {
@@ -168,11 +168,59 @@ x-user-id: user_bob_002
 GET http://localhost:6000/api/v1/conversations
 
 ### ============================================
+### 【場景 12】刪除單個對話
+### 替換 <CONVERSATION_ID> 為要刪除的對話 ID
+### 應返回 200 成功
+### ============================================
+DELETE http://localhost:6000/api/v1/conversations/cmqt00lh60006asawmkmkh5uh
+x-user-id: usr_1782187401507
+
+### ============================================
+### 【場景 13】驗證對話已被刪除 - 應返回 404
+### ============================================
+GET http://localhost:6000/api/v1/conversations/conv_1782379429167/messages
+x-user-id: usr_1782187401507
+
+### ============================================
+### 【場景 14】刪除某角色的所有對話
+### 刪除 user_alice_001 與 char_luna_001 的所有對話
+### 應返回 200 並顯示刪除數量
+### ============================================
+DELETE http://localhost:6000/api/v1/conversations/character/char_1782188579812
+x-user-id: usr_1781757820005
+
+### ============================================
+### 【場景 15】驗證角色對話已全部刪除
+### 查詢所有對話（應該只剩下 char_raven_001 的對話）
+### ============================================
+GET http://localhost:6000/api/v1/conversations
+x-user-id: usr_1781757820005
+
+### ============================================
+### 【錯誤測試】嘗試刪除不存在的對話（應返回 404）
+### ============================================
+DELETE http://localhost:6000/api/v1/conversations/non_existent_id
+x-user-id: usr_1781757820005
+
+### ============================================
+### 【錯誤測試】嘗試刪除別人的對話（應返回 403）
+### ============================================
+DELETE http://localhost:6000/api/v1/conversations/cmqru5f2n000712hmnnjw99z9
+x-user-id: user_bob_002
+
+### ============================================
+### 【錯誤測試】刪除不存在的角色對話（應返回 404）
+### ============================================
+DELETE http://localhost:6000/api/v1/conversations/character/char_nonexistent
+x-user-id: usr_1781757820005
+
+### ============================================
 ### 【測試完成】
 ###
 ### 預期結果：
-### ✅ 場景 1-11: 全部成功
+### ✅ 場景 1-15: 全部成功
 ### ✅ 錯誤測試: 返回正確的 HTTP 狀態碼和錯誤訊息
 ### ✅ 資料完整性: 訊息順序正確、時間戳正確
+### ✅ 刪除功能: 刪除成功且無法重新訪問
 ###
 ### ============================================

@@ -16,6 +16,15 @@ model Conversation {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  // 🆕 角色快照（建立對話時保存，防止後續編輯影響已有對話）
+  characterName         String?
+  characterGender       String?
+  characterTags         String?   // JSON 字符串
+  characterIntroduction String?
+  characterBackground   String?
+  characterOpening      String?
+  characterFewShots     String?   // JSON 字符串
+
   // 一對多關聯：一個對話有多條訊息
   messages    Message[]
 
