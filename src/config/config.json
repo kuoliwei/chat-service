@@ -1,0 +1,17 @@
+{
+  "ai": {
+    "contextWindow": {
+      "maxMessages": 10,
+      "includeMetadata": false
+    },
+    "timeouts": {
+      "generateResponse": 30000,
+      "initializeRAG": 30000,
+      "cleanupRAG": 10000
+    }
+  },
+  "rag": {
+    "topK": 3,
+    "threshold": 0.7
+  }
+}

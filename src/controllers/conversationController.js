@@ -92,18 +92,18 @@ export const conversationController = {
     try {
       const userId = req.headers['x-user-id'];
       const { conversationId } = req.params;
-      const { role, text } = req.body;
+      const { text } = req.body;
 
       console.log(`📤 [conversationController] POST /conversations/${conversationId}/messages`);
 
-      const message = await conversationService.sendMessageToConversation(userId, conversationId, role, text);
+      const result = await conversationService.sendMessageToConversation(userId, conversationId, text);
 
-      return res.status(201).json(message);
+      return res.status(201).json(result);
     } catch (error) {
       if (error.message === 'UNAUTHORIZED') {
         return res.status(401).json({ message: 'Unauthorized' });
       }
-      if (['MISSING_CONVERSATION_ID', 'MISSING_TEXT', 'INVALID_ROLE'].includes(error.message)) {
+      if (['MISSING_CONVERSATION_ID', 'MISSING_TEXT'].includes(error.message)) {
         return res.status(400).json({ message: error.message });
       }
       if (error.message === 'CONVERSATION_NOT_FOUND') {

@@ -1,5 +1,6 @@
 import { conversationRepository, messageRepository } from '../repositories/conversationRepository.js';
 import { serviceClient } from '../lib/serviceClient.js';
+import { config } from '../config/index.js';
 
 function generateConversationId() {
   return `conv_${Date.now()}`;
@@ -9,6 +10,140 @@ function validateUserId(userId) {
   if (!userId) {
     throw new Error('UNAUTHORIZED');
   }
+}
+
+/**
+ * 組裝傳給 ai-service 的生成請求
+ * @param {string} conversationId - 聊天室 ID
+ * @param {Object} conversation - 聊天室資訊（包含角色快照）
+ * @param {Array} messages - 所有訊息
+ * @returns {Promise<Object>} 組裝後的請求物件
+ */
+async function buildAIServiceRequest(conversationId, conversation, messages) {
+  // 1. 提取角色資訊
+  const characterInfo = {
+    name: conversation.characterName,
+    gender: conversation.characterGender,
+    tags: conversation.characterTags ? JSON.parse(conversation.characterTags) : []
+  };
+
+  // 2. 提取最近 N 條訊息（根據 config）
+  const maxMessages = config.ai.contextWindow.maxMessages;
+  const recentMessages = messages.slice(-maxMessages);
+
+  // 3. 轉換成請求格式（只需要 role 和 text）
+  const conversationHistory = recentMessages.map(msg => ({
+    role: msg.role,
+    text: msg.text
+  }));
+
+  // 4. 組裝最終請求
+  const request = {
+    conversation_id: conversationId,
+    character_info: characterInfo,
+    conversation_history: conversationHistory
+  };
+
+  console.log(`📦 [conversationService] 組裝 AI 請求: conversationId=${conversationId}, 訊息數=${conversationHistory.length}`);
+
+  return request;
+}
+
+/**
+ * 清理單個聊天室的 RAG 資料的內部方法
+ * @param {string} conversationId - 聊天室 ID
+ * @returns {Promise<void>}
+ */
+async function cleanupConversationRAG(conversationId) {
+  console.log(`🧹 [conversationService] 清理 RAG 資料: conversationId=${conversationId}`);
+  try {
+    await serviceClient.cleanupRAG(conversationId);
+    console.log(`✅ [conversationService] RAG 清理成功`);
+  } catch (error) {
+    console.error(`⚠️  [conversationService] RAG 清理失敗:`, error.message);
+    // 不中斷刪除流程，只記錄警告
+  }
+}
+
+/**
+ * 建立新聊天室的內部方法
+ * @param {string} userId - 用戶 ID
+ * @param {string} characterId - 角色 ID
+ * @param {Object} character - 角色信息對象
+ * @returns {Promise<Object>} 建立的聊天室信息
+ */
+async function createNewConversation(userId, characterId, character) {
+  console.log(`➕ [conversationService] 建立新對話: userId=${userId}, characterId=${characterId}`);
+
+  const conversationData = {
+    id: generateConversationId(),
+    userId,
+    characterId,
+    title: null,
+    characterName: character.name,
+    characterGender: character.gender,
+    characterTags: JSON.stringify(character.tags || []),
+    characterIntroduction: character.introduction,
+    characterBackground: character.background,
+    characterOpening: character.opening,
+    characterFewShots: JSON.stringify(character.fewShots || []),
+  };
+
+  const conversation = await conversationRepository.create(conversationData);
+
+  // 初始化 RAG 資料
+  console.log(`🧠 [conversationService] 初始化 RAG 資料: conversationId=${conversation.id}`);
+  try {
+    // 轉換 fewShots 格式：[{user, char}] → ["user msg\nchar msg", ...]
+    const fewshotsArray = (character.fewShots || []).map(shot => {
+      if (typeof shot === 'string') {
+        return shot;
+      }
+      // {user, char} 格式轉成字串
+      return `${shot.user}\n${shot.char}`;
+    });
+
+    const ragData = {
+      conversation_id: conversation.id,
+      character_id: characterId,
+      background: character.background || '',
+      fewshots: fewshotsArray
+    };
+    console.log(`📊 [conversationService] RAG 初始化資料:`, JSON.stringify(ragData, null, 2));
+
+    const ragResponse = await serviceClient.initializeRAG(ragData);
+    console.log(`✅ [conversationService] RAG 初始化成功`);
+  } catch (error) {
+    console.error(`⚠️  [conversationService] RAG 初始化失敗:`, error.message);
+    // 不中斷對話建立流程，只記錄警告
+  }
+
+  // 🆕 保存開場白作為第一條訊息
+  if (character.opening) {
+    try {
+      await messageRepository.create({
+        conversationId: conversation.id,
+        role: 'assistant',
+        text: character.opening,
+      });
+      console.log(`📝 [conversationService] 開場白已保存`);
+    } catch (error) {
+      console.error(`⚠️  [conversationService] 保存開場白失敗:`, error.message);
+      // 不中斷對話建立流程，只記錄警告
+    }
+  }
+
+  // 🆕 重新查詢完整的對話（包含 messages）
+  const completeConversation = await conversationRepository.findFirst(
+    { id: conversation.id },
+    {
+      messages: {
+        orderBy: { createdAt: 'asc' },
+      },
+    }
+  );
+
+  return completeConversation;
 }
 
 export const conversationService = {
@@ -48,23 +183,8 @@ export const conversationService = {
 
     // 如果不存在，建立新對話
     if (!conversation) {
-      console.log(`➕ [conversationService] 建立新對話: userId=${userId}, characterId=${characterId}`);
       console.log(`📸 [conversationService] 保存角色快照: ${character.name}`);
-
-      conversation = await conversationRepository.create({
-        id: generateConversationId(),
-        userId,
-        characterId,
-        title: null,
-        // 🆕 角色快照（防止後續編輯影響已有對話）
-        characterName: character.name,
-        characterGender: character.gender,
-        characterTags: JSON.stringify(character.tags || []),
-        characterIntroduction: character.introduction,
-        characterBackground: character.background,
-        characterOpening: character.opening,
-        characterFewShots: JSON.stringify(character.fewShots || []),
-      });
+      conversation = await createNewConversation(userId, characterId, character);
     }
 
     return {
@@ -152,7 +272,7 @@ export const conversationService = {
     };
   },
 
-  async sendMessageToConversation(userId, conversationId, role, text) {
+  async sendMessageToConversation(userId, conversationId, text) {
     validateUserId(userId);
 
     if (!conversationId) {
@@ -161,10 +281,6 @@ export const conversationService = {
 
     if (!text) {
       throw new Error('MISSING_TEXT');
-    }
-
-    if (!role || !['user', 'assistant'].includes(role)) {
-      throw new Error('INVALID_ROLE');
     }
 
     // 🆕 直接用 conversationId 查詢對話
@@ -181,23 +297,65 @@ export const conversationService = {
       throw new Error('FORBIDDEN');
     }
 
-    // 建立訊息
-    const message = await messageRepository.create({
+    // 建立用戶訊息
+    const userMessage = await messageRepository.create({
       conversationId: conversation.id,
-      role,
+      role: 'user',
       text,
     });
+
+    console.log(`📝 [conversationService] 用戶訊息已保存: id=${userMessage.id}`);
+
+    // 🆕 獲取所有訊息（包括剛剛新加的用戶訊息）
+    const allMessages = await messageRepository.findMany(
+      { conversationId: conversation.id },
+      { createdAt: 'asc' }
+    );
+
+    // 🆕 組裝請求並呼叫 ai-service 生成回應
+    console.log(`🤖 [conversationService] 準備呼叫 AI 生成回應...`);
+    const aiRequest = await buildAIServiceRequest(conversation.id, conversation, allMessages);
+
+    let aiResponse;
+    try {
+      const result = await serviceClient.generateResponse(aiRequest);
+      aiResponse = result.message;
+      console.log(`✅ [conversationService] AI 回應已取得`);
+    } catch (error) {
+      console.error(`❌ [conversationService] 呼叫 AI 失敗:`, error.message);
+      // 錯誤處理：返回預設回應，而不是中斷流程
+      aiResponse = `（${conversation.characterName} 暫時無法回應，請稍後再試。）`;
+      console.log(`⚠️  [conversationService] 使用預設回應`);
+    }
+
+    // 🆕 保存 AI 回應
+    const assistantMessage = await messageRepository.create({
+      conversationId: conversation.id,
+      role: 'assistant',
+      text: aiResponse,
+    });
+
+    console.log(`💬 [conversationService] AI 訊息已保存: id=${assistantMessage.id}`);
 
     // 更新對話的 updatedAt
     await conversationRepository.update(conversation.id, {
       updatedAt: new Date(),
     });
 
+    // 返回兩條訊息（用戶訊息 + AI 回應）
     return {
-      id: message.id,
-      role: message.role,
-      text: message.text,
-      createdAt: message.createdAt,
+      userMessage: {
+        id: userMessage.id,
+        role: userMessage.role,
+        text: userMessage.text,
+        createdAt: userMessage.createdAt,
+      },
+      assistantMessage: {
+        id: assistantMessage.id,
+        role: assistantMessage.role,
+        text: assistantMessage.text,
+        createdAt: assistantMessage.createdAt,
+      },
     };
   },
 
@@ -247,6 +405,9 @@ export const conversationService = {
     console.log(`🗑️ [conversationService] 刪除對話: conversationId=${conversationId}`);
     await conversationRepository.delete(conversationId);
 
+    // 清理 RAG 資料
+    await cleanupConversationRAG(conversationId);
+
     return { message: 'Conversation deleted successfully' };
   },
 
@@ -258,7 +419,7 @@ export const conversationService = {
     }
 
     // 驗證角色是否存在
-    await serviceClient.getCharacter(characterId);
+    await serviceClient.getCharacter(characterId, userId);
 
     // 查詢該用戶與該角色的所有對話
     const conversations = await conversationRepository.findMany({
@@ -273,6 +434,12 @@ export const conversationService = {
     // 刪除所有對話
     console.log(`🗑️ [conversationService] 刪除角色對話: userId=${userId}, characterId=${characterId}, count=${conversations.length}`);
     await conversationRepository.deleteByCharacterId(characterId, userId);
+
+    // 清理每個對話的 RAG 資料
+    console.log(`🧹 [conversationService] 清理 RAG 資料: 共 ${conversations.length} 個聊天室`);
+    for (const conversation of conversations) {
+      await cleanupConversationRAG(conversation.id);
+    }
 
     return {
       message: `${conversations.length} conversation(s) deleted successfully`,
@@ -303,22 +470,8 @@ export const conversationService = {
       await conversationRepository.delete(existingConversation.id);
     }
 
-    // 3. 建立新對話（帶角色快照）
-    console.log(`➕ [conversationService] 建立新對話: userId=${userId}, characterId=${characterId}`);
-    const newConversation = await conversationRepository.create({
-      id: generateConversationId(),
-      userId,
-      characterId,
-      title: null,
-      // 角色快照
-      characterName: character.name,
-      characterGender: character.gender,
-      characterTags: JSON.stringify(character.tags || []),
-      characterIntroduction: character.introduction,
-      characterBackground: character.background,
-      characterOpening: character.opening,
-      characterFewShots: JSON.stringify(character.fewShots || []),
-    });
+    // 3. 建立新對話
+    const newConversation = await createNewConversation(userId, characterId, character);
 
     console.log(`✅ [conversationService] 重啟完成，新對話 ID: ${newConversation.id}`);
 
@@ -360,22 +513,8 @@ export const conversationService = {
     console.log(`🗑️ [conversationService] 刪除舊對話: ${conversationId}`);
     await conversationRepository.delete(conversationId);
 
-    // 3. 建立新對話（帶角色快照）
-    console.log(`➕ [conversationService] 建立新對話`);
-    const newConversation = await conversationRepository.create({
-      id: generateConversationId(),
-      userId,
-      characterId: conversation.characterId,
-      title: null,
-      // 角色快照
-      characterName: character.name,
-      characterGender: character.gender,
-      characterTags: JSON.stringify(character.tags || []),
-      characterIntroduction: character.introduction,
-      characterBackground: character.background,
-      characterOpening: character.opening,
-      characterFewShots: JSON.stringify(character.fewShots || []),
-    });
+    // 3. 建立新對話
+    const newConversation = await createNewConversation(userId, conversation.characterId, character);
 
     console.log(`✅ [conversationService] 重啟完成，新對話 ID: ${newConversation.id}`);
 
