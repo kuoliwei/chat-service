@@ -33,6 +33,9 @@ app.get('/api/v1/conversations/character/:characterId/messages', authMiddleware,
 // 【發送訊息】發送訊息到某角色的最新對話
 app.post('/api/v1/conversations/character/:characterId/messages', authMiddleware, conversationController.sendMessage);
 
+// 【查詢訊息】查詢單一訊息（用於輪詢 AI 完成狀態）
+app.get('/api/v1/conversations/:conversationId/messages/:messageId', authMiddleware, conversationController.getMessageById);
+
 // 【發送訊息】直接發送訊息到指定對話
 app.post('/api/v1/conversations/:conversationId/messages', authMiddleware, conversationController.sendMessageToConversation);
 

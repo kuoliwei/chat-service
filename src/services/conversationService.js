@@ -306,44 +306,24 @@ export const conversationService = {
 
     console.log(`📝 [conversationService] 用戶訊息已保存: id=${userMessage.id}`);
 
-    // 🆕 獲取所有訊息（包括剛剛新加的用戶訊息）
+    // 獲取所有訊息（包括剛剛新加的用戶訊息）
     const allMessages = await messageRepository.findMany(
       { conversationId: conversation.id },
       { createdAt: 'asc' }
     );
 
-    // 🆕 組裝請求並呼叫 ai-service 生成回應
-    console.log(`🤖 [conversationService] 準備呼叫 AI 生成回應...`);
-    const aiRequest = await buildAIServiceRequest(conversation.id, conversation, allMessages);
-
-    let aiResponse;
-    try {
-      const result = await serviceClient.generateResponse(aiRequest);
-      aiResponse = result.message;
-      console.log(`✅ [conversationService] AI 回應已取得`);
-    } catch (error) {
-      console.error(`❌ [conversationService] 呼叫 AI 失敗:`, error.message);
-      // 錯誤處理：返回預設回應，而不是中斷流程
-      aiResponse = `（${conversation.characterName} 暫時無法回應，請稍後再試。）`;
-      console.log(`⚠️  [conversationService] 使用預設回應`);
-    }
-
-    // 🆕 保存 AI 回應
+    // 🆕 建立佔位的 AI 訊息（狀態為 pending）
     const assistantMessage = await messageRepository.create({
       conversationId: conversation.id,
       role: 'assistant',
-      text: aiResponse,
+      text: `（${conversation.characterName} 正在思考中...）`,
+      status: 'pending',
     });
 
-    console.log(`💬 [conversationService] AI 訊息已保存: id=${assistantMessage.id}`);
+    console.log(`💬 [conversationService] AI 佔位訊息已建立: id=${assistantMessage.id}`);
 
-    // 更新對話的 updatedAt
-    await conversationRepository.update(conversation.id, {
-      updatedAt: new Date(),
-    });
-
-    // 返回兩條訊息（用戶訊息 + AI 回應）
-    return {
+    // 🆕 立即返回（不等 AI 生成完成）
+    const response = {
       userMessage: {
         id: userMessage.id,
         role: userMessage.role,
@@ -357,6 +337,43 @@ export const conversationService = {
         createdAt: assistantMessage.createdAt,
       },
     };
+
+    // 🆕 在背景異步生成 AI 回覆（不 await）
+    console.log(`⏳ [conversationService] 背景生成 AI 回覆: messageId=${assistantMessage.id}`);
+    this._generateAIResponseAsync(conversation, assistantMessage.id, allMessages);
+
+    // 立即返回
+    return response;
+  },
+
+  // 🆕 異步生成 AI 回覆並更新訊息
+  async _generateAIResponseAsync(conversation, assistantMessageId, allMessages) {
+    try {
+      // 組裝請求
+      const aiRequest = await buildAIServiceRequest(conversation.id, conversation, allMessages);
+
+      // 呼叫 AI 服務
+      const result = await serviceClient.generateResponse(aiRequest);
+      const aiResponse = result.message;
+      console.log(`✅ [conversationService] AI 回應已取得: messageId=${assistantMessageId}`);
+
+      // 更新訊息文本和狀態
+      await messageRepository.update(assistantMessageId, {
+        text: aiResponse,
+        status: 'completed',
+      });
+
+      console.log(`💬 [conversationService] AI 訊息已更新: id=${assistantMessageId}`);
+    } catch (error) {
+      console.error(`❌ [conversationService] 背景生成失敗:`, error.message);
+      // 錯誤時用預設回應
+      const fallbackMessage = `（${conversation.characterName} 暫時無法回應，請稍後再試。）`;
+      await messageRepository.update(assistantMessageId, {
+        text: fallbackMessage,
+        status: 'completed',
+      });
+      console.log(`⚠️  [conversationService] 已用預設回應更新訊息`);
+    }
   },
 
   async getMessages(userId, characterId, limit = 50, offset = 0) {
@@ -507,7 +524,7 @@ export const conversationService = {
 
     // 1. 獲取角色信息（用於快照）
     console.log(`🔄 [conversationService] 直接重啟對話: conversationId=${conversationId}`);
-    const character = await serviceClient.getCharacter(conversation.characterId);
+    const character = await serviceClient.getCharacter(conversation.characterId, userId);
 
     // 2. 刪除舊對話
     console.log(`🗑️ [conversationService] 刪除舊對話: ${conversationId}`);
@@ -524,6 +541,31 @@ export const conversationService = {
       title: newConversation.title,
       createdAt: newConversation.createdAt,
       updatedAt: newConversation.updatedAt,
+    };
+  },
+
+  // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
+  async getMessageById(conversationId, messageId) {
+    if (!conversationId || !messageId) {
+      throw new Error('MISSING_PARAMS');
+    }
+
+    const message = await messageRepository.findFirst({
+      id: messageId,
+      conversationId,
+    });
+
+    if (!message) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+
+    return {
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      status: message.status,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
     };
   },
 };

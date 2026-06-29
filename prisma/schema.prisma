@@ -37,6 +37,7 @@ model Message {
   conversationId String
   role           String       // "user" or "assistant"
   text           String
+  status         String       @default("completed")  // "pending" or "completed"
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

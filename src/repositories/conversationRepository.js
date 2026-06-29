@@ -53,8 +53,21 @@ export const messageRepository = {
     });
   },
 
+  async findFirst(where) {
+    return await prisma.message.findFirst({
+      where,
+    });
+  },
+
   async create(data) {
     return await prisma.message.create({
+      data,
+    });
+  },
+
+  async update(id, data) {
+    return await prisma.message.update({
+      where: { id },
       data,
     });
   },

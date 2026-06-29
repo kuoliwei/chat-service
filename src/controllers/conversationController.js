@@ -261,4 +261,26 @@ export const conversationController = {
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
   },
+
+  // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
+  async getMessageById(req, res) {
+    try {
+      const { conversationId, messageId } = req.params;
+
+      console.log(`📡 [conversationController] GET /conversations/${conversationId}/messages/${messageId}`);
+
+      const message = await conversationService.getMessageById(conversationId, messageId);
+
+      return res.status(200).json(message);
+    } catch (error) {
+      if (error.message === 'MISSING_PARAMS') {
+        return res.status(400).json({ message: 'Missing conversationId or messageId' });
+      }
+      if (error.message === 'MESSAGE_NOT_FOUND') {
+        return res.status(404).json({ message: 'Message not found' });
+      }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
 };
