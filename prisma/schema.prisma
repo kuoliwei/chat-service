@@ -38,6 +38,7 @@ model Message {
   role           String       // "user" or "assistant"
   text           String
   status         String       @default("completed")  // "pending" or "completed"
+  summarized     Boolean      @default(false)        // 是否已被製作成歷史摘要
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

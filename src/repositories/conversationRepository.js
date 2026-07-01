@@ -59,6 +59,16 @@ export const messageRepository = {
     });
   },
 
+  async findUnsummarized(conversationId, orderBy = { createdAt: 'asc' }) {
+    return await prisma.message.findMany({
+      where: {
+        conversationId,
+        summarized: false,
+      },
+      orderBy,
+    });
+  },
+
   async create(data) {
     return await prisma.message.create({
       data,

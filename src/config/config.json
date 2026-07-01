@@ -13,5 +13,10 @@
   "rag": {
     "topK": 3,
     "threshold": 0.7
+  },
+  "summary": {
+    "threshold": 100,
+    "maxWords": 10,
+    "shortTermLimit": 2
   }
 }

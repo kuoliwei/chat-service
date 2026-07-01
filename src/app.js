@@ -27,8 +27,11 @@ app.get('/api/v1/conversations/summary', authMiddleware, conversationController.
 // 【取得所有對話】查詢該用戶的所有對話
 app.get('/api/v1/conversations', authMiddleware, conversationController.getAllConversations);
 
-// 【取得對話訊息】查詢某對話的訊息列表
+// 【取得對話訊息】查詢某對話的訊息列表（通過角色 ID - 舊方法）
 app.get('/api/v1/conversations/character/:characterId/messages', authMiddleware, conversationController.getMessages);
+
+// 【取得對話訊息】查詢某對話的訊息列表（通過對話 ID - 新方法）
+app.get('/api/v1/conversations/:conversationId/messages', authMiddleware, conversationController.getMessagesByConversationId);
 
 // 【發送訊息】發送訊息到某角色的最新對話
 app.post('/api/v1/conversations/character/:characterId/messages', authMiddleware, conversationController.sendMessage);
@@ -50,6 +53,9 @@ app.post('/api/v1/conversations/character/:characterId/restart', authMiddleware,
 
 // 【重啟聊天室】直接用 conversationId 刪除並建立新聊天室（推薦：前端已有 ID）
 app.post('/api/v1/conversations/:conversationId/restart', authMiddleware, conversationController.restartConversationById);
+
+// 🆕 【重試建立聊天室】清除失敗狀態，允許重新開始
+app.post('/api/v1/conversations/character/:characterId/retry', authMiddleware, conversationController.retryConversationCreation);
 
 app.listen(port, () => {
   console.log(`===============================================`);

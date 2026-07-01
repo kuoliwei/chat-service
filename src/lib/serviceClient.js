@@ -90,20 +90,21 @@ class ServiceClient {
   async initializeRAG(data) {
     try {
       console.log(`📡 [ServiceClient] 初始化 RAG: conversationId=${data.conversation_id}`);
-
-      const timeout = config.ai?.timeouts?.initializeRAG || 30000;
+      console.log(`  ├─ 發起非同步初始化（ai-service 背景執行）`);
 
       const response = await axios.post(
         `${GATEWAY_URL}/internal/rag/conversations/initialize`,
-        data,
-        { timeout }
+        data
       );
 
-      if (response.status === 200 && response.data.status === 'success') {
-        console.log(`✅ [ServiceClient] RAG 初始化成功: ${data.conversation_id}`);
+      // 🆕 接受新的狀態碼：202 Accepted + status: 'accepted'（非同步模式）
+      // 或舊的狀態碼：200 OK + status: 'success'（同步模式，已廢棄）
+      if ((response.status === 202 && response.data.status === 'accepted') ||
+          (response.status === 200 && response.data.status === 'success')) {
+        console.log(`✅ [ServiceClient] RAG 初始化請求已發送，ai-service 背景進行中`);
         return response.data;
       } else {
-        throw new Error('RAG_INITIALIZATION_FAILED');
+        throw new Error(`Unexpected response: status=${response.status}, data.status=${response.data.status}`);
       }
     } catch (error) {
       console.error(`❌ [ServiceClient] 呼叫 ai-service RAG 初始化失敗:`, error.message);
@@ -167,6 +168,104 @@ class ServiceClient {
       }
     } catch (error) {
       console.error(`❌ [ServiceClient] 呼叫 ai-service 生成回應失敗:`, error.message);
+      throw new Error(`SERVICE_ERROR: ${error.message}`);
+    }
+  }
+
+  /**
+   * 生成對話摘要
+   * @param {string} conversationId - 聊天室 ID
+   * @param {string} prompt - 摘要提示詞
+   * @returns {Promise<string>} 生成的摘要文本
+   */
+  async generateSummary(conversationId, prompt) {
+    try {
+      console.log(`📡 [ServiceClient] 生成摘要: conversationId=${conversationId}`);
+
+      const timeout = config.ai?.timeouts?.generateResponse || 30000;
+
+      const response = await axios.post(
+        `${GATEWAY_URL}/internal/chat/summary`,
+        {
+          conversation_id: conversationId,
+          prompt: prompt
+        },
+        { timeout }
+      );
+
+      if (response.status === 200 && response.data.status === 'success') {
+        console.log(`✅ [ServiceClient] 摘要生成成功`);
+        return response.data.data.summary;
+      } else {
+        throw new Error('SUMMARY_GENERATION_FAILED');
+      }
+    } catch (error) {
+      console.error(`❌ [ServiceClient] 呼叫 ai-service 生成摘要失敗:`, error.message);
+      throw new Error(`SERVICE_ERROR: ${error.message}`);
+    }
+  }
+
+  /**
+   * 將摘要存入向量資料庫
+   * @param {string} conversationId - 聊天室 ID
+   * @param {string} summary - 摘要文本
+   * @returns {Promise<Object>} 存儲結果
+   */
+  async addSummary(conversationId, summary) {
+    try {
+      console.log(`📡 [ServiceClient] 存入摘要: conversationId=${conversationId}`);
+
+      const timeout = config.ai?.timeouts?.generateResponse || 30000;
+
+      const response = await axios.post(
+        `${GATEWAY_URL}/internal/rag/summaries`,
+        {
+          conversation_id: conversationId,
+          summary: summary
+        },
+        { timeout }
+      );
+
+      if (response.status === 200 && response.data.status === 'success') {
+        console.log(`✅ [ServiceClient] 摘要存儲成功`);
+        return response.data;
+      } else {
+        throw new Error('SUMMARY_STORAGE_FAILED');
+      }
+    } catch (error) {
+      console.error(`❌ [ServiceClient] 呼叫 ai-service 存儲摘要失敗:`, error.message);
+      throw new Error(`SERVICE_ERROR: ${error.message}`);
+    }
+  }
+
+  /**
+   * 查詢 RAG 初始化狀態
+   * @param {string} conversationId - 聊天室 ID
+   * @returns {Promise<string>} 狀態 'pending' | 'ready' | 'failed'
+   */
+  async checkRAGStatus(conversationId) {
+    try {
+      console.log(`  📡 [ServiceClient] 查詢 RAG 狀態: conversationId=${conversationId}`);
+
+      const timeout = 5000;  // 狀態查詢要快
+
+      const response = await axios.get(
+        `${GATEWAY_URL}/internal/rag/conversations/${conversationId}/status`,
+        { timeout }
+      );
+
+      if (response.status === 200) {
+        const status = response.data.status;
+        console.log(`  ├─ ✅ RAG 狀態: ${status}`);
+        if (status === 'failed') {
+          console.log(`  ├─ 錯誤: ${response.data.error || 'unknown'}`);
+        }
+        return status;
+      } else {
+        throw new Error('RAG_STATUS_CHECK_FAILED');
+      }
+    } catch (error) {
+      console.error(`  ├─ ❌ 查詢失敗: ${error.message}`);
       throw new Error(`SERVICE_ERROR: ${error.message}`);
     }
   }

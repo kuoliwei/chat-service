@@ -1,226 +1,124 @@
 ### ============================================
-### 聊天室封閉測試 - persona-nexus-chat + chat-service
+### Chat-Service 測試 - 完整流程
 ###
-### 模擬場景：
-### 1. 用戶進入聊天室
-### 2. 建立與角色的對話
-### 3. 發送和接收訊息
-### 4. 查看聊天歷史
+### 主要測試：
+### 1. 建立聊天室 + RAG 初始化（202 Accepting + 輪詢）
+### 2. 發送訊息（支持摘要 + AI 生成）
+### 3. 查詢訊息列表（驗證 AI 回覆）
+### 4. 摘要機制測試（> 500 字觸發）
+### 5. 錯誤處理測試
+### 6. 刪除聊天室
 ### ============================================
 
-### 【健康檢查】
-### 確認 chat-service 是否運行
+### 【健康檢查】確認 chat-service 運行
 GET http://localhost:6000/health
 
-### ============================================
-### 【場景 1】用戶首次進入聊天室 - 獲取所有對話列表（應為空）
-### ============================================
-GET http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-
-### ============================================
-### 【場景 2】建立新對話 - 用戶與角色 "Character: Luna" 的聊天
-### ============================================
-POST http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "characterId": "char_luna_001",
-  "title": "與 Luna 的對話"
-}
-
-### 儲存對話 ID 供後續測試使用 (⬇️ 需要複製返回的 id)
-### 例如：cly1a2b3c4d5e6f7g8h9i0j1
-
-### ============================================
-### 【場景 3】發送第一條訊息 - 用戶發言
-### 替換 <CONVERSATION_ID> 為上一步返回的對話 ID
-### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqsykzs20000asaw9wf79i18/messages
-x-user-id: usr_1782187401507
-Content-Type: application/json
-
-{
-  "role": "user",
-  "text": "你好 Luna！很高興認識你。"
-}
-
-### ============================================
-### 【場景 4】發送第二條訊息 - 機器人回應
-### 替換 <CONVERSATION_ID>
-### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "role": "assistant",
-  "text": "你好！我很高興認識你。我是 Luna，一個 AI 助手。有什麼我可以幫助你的嗎？"
-}
-
-### ============================================
-### 【場景 5】用戶再次發言
-### 替換 <CONVERSATION_ID>
-### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "role": "user",
-  "text": "我想了解你的背景故事。"
-}
-
-### ============================================
-### 【場景 6】查看聊天歷史 - 獲取對話的所有訊息
-### 替換 <CONVERSATION_ID>
-### ============================================
-GET http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages?limit=50&offset=0
-x-user-id: user_alice_001
-
-### ============================================
-### 【場景 7】查看對話列表 - 應該能看到剛才建立的對話
-### ============================================
-GET http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-
-### ============================================
-### 【場景 8】與同一角色開啟第二個對話（測試多個對話）
-### 應該建立新對話，返回不同的 ID
-### ============================================
-POST http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "characterId": "char_luna_001",
-  "title": "第二次聊天"
-}
-
-### ============================================
-### 【場景 9】與另一個角色建立對話
-### ============================================
-POST http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "characterId": "char_raven_001",
-  "title": "與 Raven 的對話"
-}
-
-### 儲存這個新對話的 ID (⬇️ 需要複製返回的 id)
-
-### ============================================
-### 【場景 10】在新對話中發送訊息
-### 替換 <CONVERSATION_ID_2> 為第二個對話的 ID
-### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqru5f2n000712hmnnjw99z9/messages
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "role": "user",
-  "text": "Raven 你好！"
-}
-
-### ============================================
-### 【場景 11】再次查看所有對話 - 應該看到 2 個對話
-### ============================================
-GET http://localhost:6000/api/v1/conversations
-x-user-id: user_alice_001
-
-### ============================================
-### 【錯誤測試】缺少必填欄位
-### ============================================
-### 缺少 text 欄位（應返回 400）
-POST http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "role": "user"
-}
-
-### ============================================
-### 【錯誤測試】無效的 role 值（應返回 400）
-### ============================================
-POST http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_alice_001
-Content-Type: application/json
-
-{
-  "role": "invalid_role",
-  "text": "這條訊息應該失敗"
-}
-
-### ============================================
-### 【錯誤測試】跨用戶訪問（應返回 403）
-### 用不同的 user_id 嘗試訪問別人的對話
-### ============================================
-GET http://localhost:6000/api/v1/conversations/cmqrtqg4d000012hmt1r5i0yg/messages
-x-user-id: user_bob_002
-
-### ============================================
-### 【錯誤測試】缺少 x-user-id header（應返回 401）
-### ============================================
-GET http://localhost:6000/api/v1/conversations
-
-### ============================================
-### 【場景 12】刪除單個對話
-### 替換 <CONVERSATION_ID> 為要刪除的對話 ID
-### 應返回 200 成功
-### ============================================
-DELETE http://localhost:6000/api/v1/conversations/cmqt00lh60006asawmkmkh5uh
-x-user-id: usr_1782187401507
-
-### ============================================
-### 【場景 13】驗證對話已被刪除 - 應返回 404
-### ============================================
-GET http://localhost:6000/api/v1/conversations/conv_1782379429167/messages
-x-user-id: usr_1782187401507
-
-### ============================================
-### 【場景 14】刪除某角色的所有對話
-### 刪除 user_alice_001 與 char_luna_001 的所有對話
-### 應返回 200 並顯示刪除數量
-### ============================================
-DELETE http://localhost:6000/api/v1/conversations/character/char_1782188579812
-x-user-id: usr_1781757820005
-
-### ============================================
-### 【場景 15】驗證角色對話已全部刪除
-### 查詢所有對話（應該只剩下 char_raven_001 的對話）
-### ============================================
-GET http://localhost:6000/api/v1/conversations
-x-user-id: usr_1781757820005
-
-### ============================================
-### 【錯誤測試】嘗試刪除不存在的對話（應返回 404）
-### ============================================
-DELETE http://localhost:6000/api/v1/conversations/non_existent_id
-x-user-id: usr_1781757820005
-
-### ============================================
-### 【錯誤測試】嘗試刪除別人的對話（應返回 403）
-### ============================================
-DELETE http://localhost:6000/api/v1/conversations/cmqru5f2n000712hmnnjw99z9
-x-user-id: user_bob_002
-
-### ============================================
-### 【錯誤測試】刪除不存在的角色對話（應返回 404）
-### ============================================
-DELETE http://localhost:6000/api/v1/conversations/character/char_nonexistent
-x-user-id: usr_1781757820005
-
-### ============================================
-### 【測試完成】
 ###
-### 預期結果：
-### ✅ 場景 1-15: 全部成功
-### ✅ 錯誤測試: 返回正確的 HTTP 狀態碼和錯誤訊息
-### ✅ 資料完整性: 訊息順序正確、時間戳正確
-### ✅ 刪除功能: 刪除成功且無法重新訪問
+### 【1️⃣ 建立聊天室】
+### 初次建立 → 202 Accepted (preparing)
+### 需要輪詢直到 200 (ready) 或 503 (failed)
+GET http://localhost:6000/api/v1/conversations/character/char_1782108709056
+x-user-id: usr_1781757820005
+
 ###
+### 【2️⃣ 輪詢聊天室狀態】
+### 重複執行此請求，直到看到 status: ready
+### 或超過 120 秒則為 failed
+GET http://localhost:6000/api/v1/conversations/character/char_1782108709056
+x-user-id: usr_1781757820005
+
+###
+### 【3️⃣ 獲取對話摘要】
+### 查看用戶的所有對話（輕量版）
+GET http://localhost:6000/api/v1/conversations/summary
+x-user-id: usr_1781757820005
+
+###
+### 【4️⃣ 獲取所有對話】
+### 查看用戶的完整對話列表
+GET http://localhost:6000/api/v1/conversations
+x-user-id: usr_1781757820005
+
+###
+### 【5️⃣ 發送訊息】
+### 在建立的聊天室中發送訊息（使用 conversationId，支持完整流程：摘要+AI生成）
+### ⚠️ 需要先執行【1-2】獲得 conversationId，然後將 conversationId 替換到 URL 中
+POST http://localhost:6000/api/v1/conversations/conv_1782902878477/messages
+x-user-id: usr_1781757820005
+Content-Type: application/json
+
+{
+  "text": "你好，赫蘿！很高興認識你。"
+}
+
+###
+### 【6️⃣ 獲取對話訊息】
+### 查詢對話中的所有訊息（包含用戶和 AI 的回覆）
+### 注意：使用 characterId，不是 conversationId
+GET http://localhost:6000/api/v1/conversations/character/char_1782108709056/messages
+x-user-id: usr_1781757820005
+
+###
+### 【7️⃣ 發送長訊息 - 測試摘要機制】
+### 需要累積 > 500 字才會觸發摘要
+### 可重複執行此區塊多次，每次發送不同的長訊息
+POST http://localhost:6000/api/v1/conversations/conv_1782902878477/messages
+x-user-id: usr_1781757820005
+Content-Type: application/json
+
+{
+  "text": "這是一條很長的訊息，用來測試摘要機制。如果累積的未摘要訊息字數超過 500 字，系統會自動觸發摘要功能。摘要會將舊訊息濃縮，保留最新的 2 條訊息原文。此機制幫助控制對話歷史的長度，避免發送過長的上下文給 AI 模型。請注意這是一條示例長訊息。"
+}
+
+###
+### 【8️⃣ 測試：缺少必要欄位】
+### 應返回 400 Bad Request
+POST http://localhost:6000/api/v1/conversations/conv_1782902069255/messages
+x-user-id: usr_1781757820005
+Content-Type: application/json
+
+{
+  "text": ""
+}
+
+###
+### 【9️⃣ 測試：不存在的角色】
+### 應返回 404 Not Found
+GET http://localhost:6000/api/v1/conversations/character/char_nonexistent
+x-user-id: usr_1781757820005
+
+###
+### 【🔟 測試：缺少認證 header】
+### 應返回 401 Unauthorized
+GET http://localhost:6000/api/v1/conversations
+
+###
+### 【1️⃣1️⃣ 刪除角色的所有對話】
+### ⚠️ 需要先執行【1-2】確保有對話存在
+DELETE http://localhost:6000/api/v1/conversations/character/char_1782108709056
+x-user-id: usr_1781757820005
+
+###
+### 【1️⃣2️⃣ 驗證對話已刪除】
+### 查詢對話摘要，應該看不到該角色的對話
+GET http://localhost:6000/api/v1/conversations/summary
+x-user-id: usr_1781757820005
+
+###
+### ============================================
+### 測試完成
+###
+### ✅ 預期結果：
+### 1️⃣  202 Accepted (preparing)
+### 2️⃣  200 OK (ready) 或輪詢多次後成功
+### 3️⃣  200 OK (對話摘要列表)
+### 4️⃣  200 OK (完整對話列表)
+### 5️⃣  201 Created (訊息已發送 + AI 佔位訊息)
+### 6️⃣  200 OK (訊息列表)
+### 7️⃣  201 Created (長訊息 - 如果字數達到將觸發摘要)
+### 8️⃣  400 Bad Request (缺少欄位)
+### 9️⃣  404 Not Found (不存在的角色)
+### 🔟  401 Unauthorized (缺少 header)
+### 1️⃣1️⃣  200 OK (刪除成功)
+### 1️⃣2️⃣  200 OK (對話已刪除)
 ### ============================================
