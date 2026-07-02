@@ -93,11 +93,17 @@ export const conversationController = {
 
       return res.status(201).json(message);
     } catch (error) {
+      console.error('❌ [sendMessage] 錯誤:', error.message);
       if (error.message === 'UNAUTHORIZED') {
         return res.status(401).json({ message: 'Unauthorized' });
       }
       if (['MISSING_TEXT', 'INVALID_ROLE', 'CONVERSATION_NOT_FOUND'].includes(error.message)) {
-        return res.status(400).json({ message: error.message });
+        const errorMessages = {
+          'MISSING_TEXT': 'Invalid request',
+          'INVALID_ROLE': 'Invalid request',
+          'CONVERSATION_NOT_FOUND': 'Conversation not found'
+        };
+        return res.status(400).json({ message: errorMessages[error.message] || 'Invalid request' });
       }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
@@ -116,11 +122,12 @@ export const conversationController = {
 
       return res.status(201).json(result);
     } catch (error) {
+      console.error('❌ [sendMessageToConversation] 錯誤:', error.message);
       if (error.message === 'UNAUTHORIZED') {
         return res.status(401).json({ message: 'Unauthorized' });
       }
       if (['MISSING_CONVERSATION_ID', 'MISSING_TEXT'].includes(error.message)) {
-        return res.status(400).json({ message: error.message });
+        return res.status(400).json({ message: 'Invalid request' });
       }
       if (error.message === 'CONVERSATION_NOT_FOUND') {
         return res.status(404).json({ message: 'Conversation not found' });
