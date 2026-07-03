@@ -79,6 +79,32 @@ class ServiceClient {
   }
 
   /**
+   * 檢查 AI Service 健康狀態
+   * @returns {Promise<boolean>} true 如果 AI Service 可達，false 如果無法連接
+   */
+  async checkAIServiceHealth() {
+    try {
+      console.log(`📡 [ServiceClient] 檢查 AI Service 健康狀態...`);
+      const response = await axios.get(`${GATEWAY_URL}/internal/health/ai`, {
+        timeout: 5000  // 5 秒超時
+      });
+
+      if (response.status === 200) {
+        console.log(`✅ [ServiceClient] AI Service 健康正常`);
+        return true;
+      }
+    } catch (error) {
+      // 🆕 【被動報錯】拋出具體的錯誤信息，而不是吞掉異常
+      const errorMessage = error.response?.status
+        ? `HTTP ${error.response.status}: ${error.message}`
+        : `Connection failed: ${error.message}`;
+
+      console.error(`❌ [ServiceClient] AI Service 無法連接: ${errorMessage}`);
+      throw new Error(errorMessage);  // ← 拋異常，讓上層知道具體原因
+    }
+  }
+
+  /**
    * 初始化聊天室的 RAG 資料
    * @param {Object} data - RAG 初始化資料
    * @param {string} data.conversation_id - 聊天室 ID
@@ -135,8 +161,11 @@ class ServiceClient {
         throw new Error('RAG_CLEANUP_FAILED');
       }
     } catch (error) {
-      console.error(`❌ [ServiceClient] 呼叫 ai-service RAG 清理失敗:`, error.message);
-      throw new Error(`SERVICE_ERROR: ${error.message}`);
+      // 🆕 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.detail;
+      const errorMessage = detail || error.message;
+      console.error(`❌ [ServiceClient] 呼叫 ai-service RAG 清理失敗:`, errorMessage);
+      throw new Error(`SERVICE_ERROR: ${errorMessage}`);
     }
   }
 

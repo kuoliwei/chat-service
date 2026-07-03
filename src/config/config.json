@@ -5,7 +5,7 @@
       "includeMetadata": false
     },
     "timeouts": {
-      "generateResponse": 30000,
+      "generateResponse": 60000,
       "initializeRAG": 30000,
       "cleanupRAG": 10000
     }

@@ -40,6 +40,11 @@ export const conversationController = {
       if (error.message === 'FORBIDDEN') {
         return res.status(403).json({ message: 'Access denied to this character' });
       }
+      // 🆕 【統一風格】AI Service 不可用（包含具體錯誤信息）
+      if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
+        const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
+        return res.status(503).json({ message: specificError });
+      }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
     }
@@ -135,6 +140,15 @@ export const conversationController = {
       if (error.message === 'FORBIDDEN') {
         return res.status(403).json({ message: 'Access denied' });
       }
+      // 🆕 AI Service 不可用（包含具體錯誤信息）
+      if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
+        // 提取具體的錯誤信息（格式：AI_SERVICE_UNAVAILABLE: [具體錯誤]）
+        const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
+        return res.status(503).json({
+          message: specificError,
+          aiGenerationStatus: { status: 'failed', error: specificError }
+        });
+      }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
     }
@@ -208,6 +222,11 @@ export const conversationController = {
       if (error.message === 'FORBIDDEN') {
         return res.status(403).json({ status: 'error', message: 'Access denied' });
       }
+      // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
+      if (error.message.startsWith('SERVICE_ERROR')) {
+        const specificError = error.message.replace('SERVICE_ERROR: ', '');
+        return res.status(503).json({ status: 'error', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
+      }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
@@ -239,6 +258,11 @@ export const conversationController = {
       }
       if (error.message === 'NO_CONVERSATIONS_FOUND') {
         return res.status(404).json({ status: 'error', message: 'No conversations found for this character' });
+      }
+      // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
+      if (error.message.startsWith('SERVICE_ERROR')) {
+        const specificError = error.message.replace('SERVICE_ERROR: ', '');
+        return res.status(503).json({ status: 'error', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
       }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
@@ -349,6 +373,44 @@ export const conversationController = {
       if (error.message === 'JOB_NOT_FAILED') {
         return res.status(409).json({ message: 'Job is not in failed state' });
       }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
+
+  // 🆕 查詢 AI 生成狀態
+  async getAIGenerationStatus(req, res) {
+    try {
+      const { conversationId } = req.params;
+
+      console.log(`📊 [conversationController] GET /conversations/${conversationId}/ai-generation-status`);
+
+      const status = conversationService.getAIGenerationStatus(conversationId);
+
+      return res.status(200).json(status);
+    } catch (error) {
+      if (error.message === 'MISSING_CONVERSATION_ID') {
+        return res.status(400).json({ message: 'Missing conversationId' });
+      }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
+
+  // 🆕 清除 AI 生成狀態（用戶重試時）
+  async clearAIGenerationStatus(req, res) {
+    try {
+      const { conversationId } = req.params;
+
+      console.log(`🗑️ [conversationController] DELETE /conversations/${conversationId}/ai-generation-status`);
+
+      conversationService.clearAIGenerationStatus(conversationId);
+
+      return res.status(200).json({
+        status: 'cleared',
+        message: 'AI generation status cleared'
+      });
+    } catch (error) {
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
     }

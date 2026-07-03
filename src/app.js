@@ -57,6 +57,12 @@ app.post('/api/v1/conversations/:conversationId/restart', authMiddleware, conver
 // 🆕 【重試建立聊天室】清除失敗狀態，允許重新開始
 app.post('/api/v1/conversations/character/:characterId/retry', authMiddleware, conversationController.retryConversationCreation);
 
+// 🆕 【查詢 AI 生成狀態】查詢 AI 回應是否失敗（用於前端輪詢失敗檢測）
+app.get('/api/v1/conversations/:conversationId/ai-generation-status', authMiddleware, conversationController.getAIGenerationStatus);
+
+// 🆕 【清除 AI 生成狀態】用戶重試時清除失敗狀態
+app.delete('/api/v1/conversations/:conversationId/ai-generation-status', authMiddleware, conversationController.clearAIGenerationStatus);
+
 app.listen(port, () => {
   console.log(`===============================================`);
   console.log(`  Chat-Service 伺服器已成功啟動！`);
