@@ -238,7 +238,8 @@ class ServiceClient {
    * 將摘要存入向量資料庫
    * @param {string} conversationId - 聊天室 ID
    * @param {string} summary - 摘要文本
-   * @returns {Promise<Object>} 存儲結果
+   * @returns {Promise<string>} summary_id（Qdrant point id，UUID）——
+   *   🆕 記錄到被摘要訊息的 summaryId 欄位，供日後精準刪除
    */
   async addSummary(conversationId, summary) {
     try {
@@ -256,14 +257,92 @@ class ServiceClient {
       );
 
       if (response.status === 200 && response.data.status === 'success') {
-        console.log(`✅ [ServiceClient] 摘要存儲成功`);
-        return response.data;
+        const summaryId = response.data.summary_id;
+        console.log(`✅ [ServiceClient] 摘要存儲成功: summary_id=${summaryId}`);
+        return summaryId;
       } else {
         throw new Error('SUMMARY_STORAGE_FAILED');
       }
     } catch (error) {
-      console.error(`❌ [ServiceClient] 呼叫 ai-service 存儲摘要失敗:`, error.message);
-      throw new Error(`SERVICE_ERROR: ${error.message}`);
+      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.detail;
+      const errorMessage = detail || error.message;
+      console.error(`❌ [ServiceClient] 呼叫 ai-service 存儲摘要失敗:`, errorMessage);
+      throw new Error(`SERVICE_ERROR: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * 按 summary_id 精準刪除摘要（訊息回溯刪除時的記憶清理）
+   * @param {string} conversationId - 聊天室 ID
+   * @param {Array<string>} summaryIds - 摘要 ID 列表（= Qdrant point id）
+   * @returns {Promise<Object>} 刪除結果
+   * @throws SERVICE_ERROR 如果刪除失敗（RAG 不可用等）——【被動報錯】
+   */
+  async deleteSummaries(conversationId, summaryIds) {
+    try {
+      console.log(`📡 [ServiceClient] 刪除摘要: conversationId=${conversationId}, 共 ${summaryIds.length} 份`);
+
+      const timeout = config.ai?.timeouts?.cleanupRAG || 10000;
+
+      const response = await axios.delete(
+        `${GATEWAY_URL}/internal/rag/summaries`,
+        {
+          data: {
+            conversation_id: conversationId,
+            summary_ids: summaryIds
+          },
+          timeout
+        }
+      );
+
+      if (response.status === 200 && response.data.status === 'success') {
+        console.log(`✅ [ServiceClient] 摘要刪除成功: ${response.data.deleted_count} 份`);
+        return response.data;
+      } else {
+        throw new Error('SUMMARY_DELETION_FAILED');
+      }
+    } catch (error) {
+      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.detail;
+      const errorMessage = detail || error.message;
+      console.error(`❌ [ServiceClient] 呼叫 ai-service 刪除摘要失敗:`, errorMessage);
+      throw new Error(`SERVICE_ERROR: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * 更新聊天室的主角（主人公）背景到 RAG 資料庫
+   * ai-service 會先刪除舊切片再存入新切片（background 為空 = 清除）
+   * @param {string} conversationId - 聊天室 ID
+   * @param {string} background - 主角背景文本
+   * @returns {Promise<Object>} 更新結果
+   * @throws SERVICE_ERROR 如果更新失敗（RAG 不可用等）——【被動報錯】
+   */
+  async updateProtagonistRAG(conversationId, background) {
+    try {
+      console.log(`📡 [ServiceClient] 更新主角背景 RAG: conversationId=${conversationId}, ${(background || '').length} 字`);
+
+      const timeout = config.ai?.timeouts?.initializeRAG || 30000;
+
+      const response = await axios.put(
+        `${GATEWAY_URL}/internal/rag/conversations/${conversationId}/protagonist`,
+        { background: background || '' },
+        { timeout }
+      );
+
+      if (response.status === 200 && response.data.status === 'success') {
+        console.log(`✅ [ServiceClient] 主角背景 RAG 更新成功`);
+        return response.data;
+      } else {
+        throw new Error('PROTAGONIST_RAG_UPDATE_FAILED');
+      }
+    } catch (error) {
+      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.detail;
+      const errorMessage = detail || error.message;
+      console.error(`❌ [ServiceClient] 呼叫 ai-service 更新主角背景失敗:`, errorMessage);
+      throw new Error(`SERVICE_ERROR: ${errorMessage}`);
     }
   }
 

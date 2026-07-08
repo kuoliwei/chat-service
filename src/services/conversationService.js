@@ -104,10 +104,12 @@ async function buildAIServiceRequest(conversationId, conversation, messages) {
   }));
 
   // 4. 組裝最終請求
+  // 🆕 protagonist_name：主角（主人公）名稱，未設定為 null（ai-service 不注入主角段落）
   const request = {
     conversation_id: conversationId,
     character_info: characterInfo,
-    conversation_history: conversationHistory
+    conversation_history: conversationHistory,
+    protagonist_name: conversation.protagonistName || null
   };
 
   console.log(`📦 [conversationService] 組裝 AI 請求: conversationId=${conversationId}, 訊息數=${conversationHistory.length}`);
@@ -163,20 +165,21 @@ async function executeSummary(conversationId, messagesToSummarize) {
 
   // 3. 將摘要存入向量資料庫
   // 🆕 【被動報錯】如果 RAG 不可用，直接拋異常，中斷對話流程
+  // 🆕 回傳值為 ai-service 生成的 summary_id（= Qdrant point id）
   console.log(`  ├── 💾 存入向量資料庫...`);
-  await serviceClient.addSummary(conversationId, summaryResult);
+  const summaryId = await serviceClient.addSummary(conversationId, summaryResult);
 
-  // 4. 標記這些訊息為已摘要
-  console.log(`  ├── 🏷️  標記訊息為已摘要...`);
+  // 4. 標記這些訊息為已摘要，並記錄涵蓋它們的摘要 ID（供日後回溯刪除時精準配對）
+  console.log(`  ├── 🏷️  標記訊息為已摘要（summaryId=${summaryId}）...`);
   for (const msg of messagesToSummarize) {
-    await messageRepository.update(msg.id, { summarized: true });
+    await messageRepository.update(msg.id, { summarized: true, summaryId });
   }
 
-  console.log(`  ✅ [系統] 摘要完成，${messagesToSummarize.length} 條訊息已標記`);
+  console.log(`  ✅ [系統] 摘要完成，${messagesToSummarize.length} 條訊息已標記（summaryId=${summaryId}）`);
   console.log(`  ${'-'.repeat(50)}\n`);
 
   return {
-    summaryId: `summary_${Date.now()}`,
+    summaryId,
     summary: summaryResult,
     summarizedCount: messagesToSummarize.length
   };
@@ -211,12 +214,14 @@ async function _prepareAndCreateConversation(userId, characterId, character, job
     // === 1. 發起 RAG 初始化 ===
     console.log(`\n  🧠 [背景任務] 發起 RAG 初始化`);
 
-    // 轉換 fewShots 格式：[{user, char}] → ["user msg\nchar msg", ...]
+    // 轉換 fewShots 格式：[{user, char}] → ["User: user msg\nCharacter: char msg", ...]
+    // 🆕 加上說話者標籤（User:/Character: 冒號風格，LLM 訓練語料中最常見的對話標記慣例），
+    // 讓 LLM 明確知道範例中哪句是用戶、哪句是角色——標籤在存入 RAG 時就寫進文本
     const fewshotsArray = (character.fewShots || []).map(shot => {
       if (typeof shot === 'string') {
         return shot;
       }
-      return `${shot.user}\n${shot.char}`;
+      return `User: ${shot.user}\nCharacter: ${shot.char}`;
     });
 
     const ragData = {
@@ -610,7 +615,8 @@ export const conversationService = {
     };
   },
 
-  async sendMessageToConversation(userId, conversationId, text) {
+  // 🆕 tempUserId（可選）：前端臨時訊息 ID，生成成功後放入狀態供前端配對替換
+  async sendMessageToConversation(userId, conversationId, text, tempUserId) {
     validateUserId(userId);
 
     if (!conversationId) {
@@ -654,31 +660,61 @@ export const conversationService = {
     //   throw new Error(`AI_SERVICE_UNAVAILABLE: ${error.message}`);
     // }
 
-    // 清除舊的失敗狀態（防止顯示過期的失敗消息）
-    aiGenerationStatus.delete(conversation.id);
-    console.log(`🔄 [conversationService] 清除舊的 AI 生成狀態，準備新任務`);
+    // 🆕 【第二步：拒絕並行生成】同一聊天室已有任務進行中 → 拒絕
+    // 【原子性】檢查後立刻上鎖，中間不能有任何 await——
+    // Node 單線程下同一個同步區塊不會被其他請求插隊，堵住競態窗口
+    const existingStatus = aiGenerationStatus.get(conversation.id);
+    if (existingStatus && existingStatus.status === 'generating') {
+      // 🆕 【第三步：殭屍鎖保險】generating 超過時限視為失效，放行新請求
+      // 時限 = generateResponse timeout + 30 秒緩衝（異步任務最久等 timeout 就會進 catch）
+      const staleLimitMs = (config.ai?.timeouts?.generateResponse || 60000) + 30000;
+      const lockAgeMs = Date.now() - (existingStatus.timestamp || 0);
+
+      if (lockAgeMs < staleLimitMs) {
+        console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中（已 ${Math.round(lockAgeMs / 1000)} 秒），拒絕新訊息`);
+        throw new Error('AI_GENERATION_IN_PROGRESS');
+      }
+
+      // 鎖已過期：不應該發生的異常狀態，記警告後放行（下面會覆寫新鎖）
+      console.warn(`⚠️  [conversationService] 偵測到殭屍鎖: 聊天室 ${conversation.id} 的 generating 狀態已掛 ${Math.round(lockAgeMs / 1000)} 秒（時限 ${staleLimitMs / 1000} 秒），視為失效並放行`);
+    }
+    aiGenerationStatus.set(conversation.id, {
+      status: 'generating',
+      timestamp: Date.now()
+    });
+    console.log(`🔒 [conversationService] 已上鎖（generating），開始處理訊息`);
 
     // 🆕 【重大改動】不立即保存用戶訊息
     // 改為：在 AI 生成成功後，才同時保存用戶訊息 + AI 回覆
     // 這樣可以避免：AI 生成失敗時，用戶訊息孤立在資料庫
     console.log(`⏳ [conversationService] 暫不保存用戶訊息，等待 AI 生成結果...`);
 
-    // 獲取未摘要的訊息（不包括這次的用戶訊息，因為還沒保存）
-    let unsummarizedMessages = await messageRepository.findUnsummarized(conversation.id);
-
-    // 🐛 【DEBUG】列印撈出的所有未摘要訊息
-    console.log(`\n🐛 [DEBUG] ===== 撈出未摘要訊息（summarized=false，共 ${unsummarizedMessages.length} 條）=====`);
-    unsummarizedMessages.forEach((msg, idx) => {
-      console.log(`🐛 [DEBUG]   ${idx + 1}. id=${msg.id} [${msg.role}] createdAt=${msg.createdAt?.toISOString?.() || msg.createdAt} | ${msg.text}`);
-    });
-
-    // 🆕 檢查並執行摘要機制（先摘要，再生成回應）
-    const summaryCheck = checkIfNeedsSummary(unsummarizedMessages);
-    if (summaryCheck && summaryCheck.needsSummary) {
-      console.log(`[conversationService] 檢測到需要摘要，先執行摘要...`);
-      await executeSummary(conversation.id, summaryCheck.messagesToSummarize);
-      // 摘要完成後，重新獲取未摘要的訊息
+    // 🆕 【失敗解鎖】上鎖後、啟動異步任務前，任何環節拋錯都要先解鎖再拋出
+    // 否則鎖會殘留在 Map 中，聊天室被永久鎖死
+    let unsummarizedMessages;
+    try {
+      // 獲取未摘要的訊息（不包括這次的用戶訊息，因為還沒保存）
       unsummarizedMessages = await messageRepository.findUnsummarized(conversation.id);
+
+      // 🐛 【DEBUG】列印撈出的所有未摘要訊息
+      console.log(`\n🐛 [DEBUG] ===== 撈出未摘要訊息（summarized=false，共 ${unsummarizedMessages.length} 條）=====`);
+      unsummarizedMessages.forEach((msg, idx) => {
+        console.log(`🐛 [DEBUG]   ${idx + 1}. id=${msg.id} [${msg.role}] createdAt=${msg.createdAt?.toISOString?.() || msg.createdAt} | ${msg.text}`);
+      });
+
+      // 🆕 檢查並執行摘要機制（先摘要，再生成回應）
+      const summaryCheck = checkIfNeedsSummary(unsummarizedMessages);
+      if (summaryCheck && summaryCheck.needsSummary) {
+        console.log(`[conversationService] 檢測到需要摘要，先執行摘要...`);
+        await executeSummary(conversation.id, summaryCheck.messagesToSummarize);
+        // 摘要完成後，重新獲取未摘要的訊息
+        unsummarizedMessages = await messageRepository.findUnsummarized(conversation.id);
+      }
+    } catch (error) {
+      // 解鎖後再拋出，讓 controller 回傳錯誤
+      console.log(`🔓 [conversationService] 前置流程失敗，解鎖並拋出: ${error.message}`);
+      aiGenerationStatus.delete(conversation.id);
+      throw error;
     }
 
     // 🆕 【立即返回】前端已經用臨時 ID 顯示訊息了
@@ -690,14 +726,11 @@ export const conversationService = {
     };
 
     // 在背景異步生成 AI 回覆（不 await，不創建占位符）
+    // 注意：'generating' 鎖已在流程開頭（檢查後）原子性地上好，此處不再重複寫入
     console.log(`⏳ [conversationService] 背景生成 AI 回覆`);
 
-    // 🆕 清除舊的失敗狀態，為新的生成做準備（防止前端輪詢查到舊狀態）
-    aiGenerationStatus.delete(conversation.id);
-    console.log(`🔄 [conversationService] 清除舊的 AI 生成狀態，準備新任務`);
-
-    // 🆕 傳入用戶訊息文本，讓異步任務保存
-    this._generateAIResponseAsync(conversation, unsummarizedMessages, text);
+    // 🆕 傳入用戶訊息文本與臨時 ID，讓異步任務保存並回報配對
+    this._generateAIResponseAsync(conversation, unsummarizedMessages, text, tempUserId);
 
     // 立即返回
     return response;
@@ -705,7 +738,8 @@ export const conversationService = {
 
   // 異步生成 AI 回覆並創建訊息
   // 🆕 【重大改動】同時保存用戶訊息 + AI 回覆（原子性）
-  async _generateAIResponseAsync(conversation, allMessages, userText) {
+  // tempUserId（可選）：前端臨時訊息 ID，成功時放入狀態供前端配對
+  async _generateAIResponseAsync(conversation, allMessages, userText, tempUserId) {
     try {
       // 🆕 組裝包含新用戶訊息的對話列表（用於 AI 上下文）
       const messagesForAI = [
@@ -745,11 +779,20 @@ export const conversationService = {
       console.log(`  【DEBUG】AI 訊息詳情: ID: ${assistantMessage.id.substring(0, 8)}..., status: ${assistantMessage.status}, createdAt: ${assistantMessage.createdAt}`);
 
       // 記錄成功狀態到內存 Map，讓前端可以檢測到生成完成
-      aiGenerationStatus.set(conversation.id, {
+      // 🆕 附上「臨時 ID ↔ 真實 ID」配對資訊，前端據此精準替換
+      const completedStatus = {
         status: 'completed',
+        tempUserId: tempUserId || null,          // 前端送來的臨時用戶訊息 ID
+        userMessageId: userMessage.id,           // 剛存入 DB 的用戶訊息真實 ID
+        assistantMessageId: assistantMessage.id, // 剛存入 DB 的 AI 訊息真實 ID
         timestamp: Date.now()
-      });
+      };
+      aiGenerationStatus.set(conversation.id, completedStatus);
       console.log(`✅ [conversationService] AI 生成狀態已更新為 'completed'`);
+      console.log(`🐛 [DEBUG] ===== 配對資訊已寫入狀態 Map =====`);
+      console.log(`🐛 [DEBUG]   tempUserId（前端臨時）: ${completedStatus.tempUserId}`);
+      console.log(`🐛 [DEBUG]   userMessageId（DB 真實）: ${completedStatus.userMessageId}`);
+      console.log(`🐛 [DEBUG]   assistantMessageId（DB 真實）: ${completedStatus.assistantMessageId}`);
     } catch (error) {
       console.error(`❌ [conversationService] 背景生成失敗:`, error.message);
       console.log(`⚠️  [conversationService] 用戶訊息與 AI 訊息都不保存（失敗時不持久化）`);
@@ -969,6 +1012,186 @@ export const conversationService = {
       title: newConversation.title,
       createdAt: newConversation.createdAt,
       updatedAt: newConversation.updatedAt,
+    };
+  },
+
+  // 🆕 【主角人設】讀取聊天室的主角名稱與背景
+  async getProtagonist(userId, conversationId) {
+    validateUserId(userId);
+
+    if (!conversationId) {
+      throw new Error('MISSING_CONVERSATION_ID');
+    }
+
+    const conversation = await conversationRepository.findFirst({ id: conversationId });
+    if (!conversation) {
+      throw new Error('CONVERSATION_NOT_FOUND');
+    }
+    if (conversation.userId !== userId) {
+      throw new Error('FORBIDDEN');
+    }
+
+    return {
+      protagonistName: conversation.protagonistName,
+      protagonistBackground: conversation.protagonistBackground,
+    };
+  },
+
+  // 🆕 【主角人設】更新聊天室的主角名稱與背景
+  // 流程：先更新 RAG（背景切片，失敗拋錯中止）→ 成功後才寫 DB（與刪除的順序原則一致）
+  async updateProtagonist(userId, conversationId, protagonistName, protagonistBackground) {
+    validateUserId(userId);
+
+    if (!conversationId) {
+      throw new Error('MISSING_CONVERSATION_ID');
+    }
+
+    const conversation = await conversationRepository.findFirst({ id: conversationId });
+    if (!conversation) {
+      throw new Error('CONVERSATION_NOT_FOUND');
+    }
+    if (conversation.userId !== userId) {
+      throw new Error('FORBIDDEN');
+    }
+
+    console.log(`\n👤 [conversationService] 更新主角人設: conversationId=${conversationId}`);
+    console.log(`   ├─ 名稱: ${protagonistName || '(空)'}`);
+    console.log(`   ├─ 背景: ${(protagonistBackground || '').length} 字`);
+
+    // 1. 先更新 RAG（ai-service 會刪舊切片再存新切片；失敗拋錯，DB 不動）
+    await serviceClient.updateProtagonistRAG(conversationId, protagonistBackground || '');
+    console.log(`   ├─ ✅ RAG 主角背景切片已更新`);
+
+    // 2. RAG 成功後才寫 DB
+    await conversationRepository.update(conversationId, {
+      protagonistName: protagonistName || null,
+      protagonistBackground: protagonistBackground || null,
+    });
+    console.log(`   └─ ✅ DB 主角欄位已更新\n`);
+
+    return {
+      protagonistName: protagonistName || null,
+      protagonistBackground: protagonistBackground || null,
+    };
+  },
+
+  // 🆕 【刪除訊息】刪除指定的用戶訊息及其後所有訊息（回溯式刪除）
+  // 語義：對話裁剪回該訊息發出之前的狀態，之後的用戶訊息與 AI 回覆全部刪除
+  async deleteMessageAndSubsequent(userId, conversationId, messageId) {
+    validateUserId(userId);
+
+    if (!conversationId || !messageId) {
+      throw new Error('MISSING_PARAMS');
+    }
+
+    // 驗證對話存在與所有權
+    const conversation = await conversationRepository.findFirst({ id: conversationId });
+    if (!conversation) {
+      throw new Error('CONVERSATION_NOT_FOUND');
+    }
+    if (conversation.userId !== userId) {
+      throw new Error('FORBIDDEN');
+    }
+
+    // 🆕 【生成中拒絕】AI 正在生成時不允許刪除（生成完成會存入新訊息，會打架）
+    const genStatus = aiGenerationStatus.get(conversationId);
+    if (genStatus && genStatus.status === 'generating') {
+      console.log(`🚫 [conversationService] 聊天室 ${conversationId} AI 生成中，拒絕刪除訊息`);
+      throw new Error('AI_GENERATION_IN_PROGRESS');
+    }
+
+    // 驗證目標訊息存在、屬於該對話、且是用戶自己的訊息
+    const targetMessage = await messageRepository.findFirst({
+      id: messageId,
+      conversationId,
+    });
+    if (!targetMessage) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+    if (targetMessage.role !== 'user') {
+      throw new Error('NOT_USER_MESSAGE');
+    }
+
+    // 撈出全部訊息（時間升序），找到目標的位置，其後（含目標）全部刪除
+    // 用排序位置而非 createdAt 比較，避免同毫秒時間戳的邊界問題
+    const allMessages = await messageRepository.findMany(
+      { conversationId },
+      { createdAt: 'asc' }
+    );
+    const targetIndex = allMessages.findIndex(m => m.id === messageId);
+    if (targetIndex === -1) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+
+    const messagesToDelete = allMessages.slice(targetIndex);
+    const idsToDelete = messagesToDelete.map(m => m.id);
+
+    console.log(`\n🗑️ [conversationService] ===== 回溯刪除開始: conversationId=${conversationId} =====`);
+    console.log(`🐛 [DEBUG] 目標訊息: id=${messageId}（位置 ${targetIndex + 1}/${allMessages.length}）`);
+
+    // 🐛 【DEBUG】對話全貌：每條訊息的位置、id、摘要歸屬，並標記刪除線
+    console.log(`🐛 [DEBUG] ----- 對話全貌（共 ${allMessages.length} 條，>>> 起為刪除範圍）-----`);
+    allMessages.forEach((m, idx) => {
+      const marker = idx >= targetIndex ? '>>>' : '   ';
+      const summaryTag = m.summaryId ? `summaryId=${m.summaryId}` : (m.summarized ? 'summarized(舊資料,無id)' : '未摘要');
+      console.log(`🐛 [DEBUG] ${marker} ${idx + 1}. id=${m.id} [${m.role}] ${summaryTag} | ${m.text.substring(0, 30)}...`);
+    });
+
+    console.log(`🐛 [DEBUG] ----- 將被刪除的訊息（共 ${idsToDelete.length} 條）-----`);
+    messagesToDelete.forEach((m, idx) => {
+      console.log(`🐛 [DEBUG]   刪除 ${idx + 1}. id=${m.id} [${m.role}] | ${m.text.substring(0, 30)}...`);
+    });
+
+    // 🆕 【記憶清理】收集刪除範圍內訊息的 summaryId（去重、排除 null）
+    // 這些摘要涵蓋了被刪的訊息，必須連帶刪除，否則角色會「記得」被刪的劇情
+    const summaryIdsToDelete = [...new Set(
+      messagesToDelete.map(m => m.summaryId).filter(Boolean)
+    )];
+
+    if (summaryIdsToDelete.length > 0) {
+      console.log(`🐛 [DEBUG] ----- 將被刪除的摘要（共 ${summaryIdsToDelete.length} 份）-----`);
+      summaryIdsToDelete.forEach((sid, idx) => {
+        const coveredInRange = messagesToDelete.filter(m => m.summaryId === sid).map(m => m.id);
+        console.log(`🐛 [DEBUG]   摘要 ${idx + 1}. summaryId=${sid}（涵蓋刪除範圍內的訊息: ${coveredInRange.join(', ')}）`);
+      });
+
+      // 找出刪除點之前、被這些摘要涵蓋的訊息——摘要刪除後，它們要標回未摘要
+      const messagesToUnmark = allMessages
+        .slice(0, targetIndex)
+        .filter(m => m.summaryId && summaryIdsToDelete.includes(m.summaryId));
+
+      console.log(`🐛 [DEBUG] ----- 將標回未摘要的訊息（刪除點之前、共 ${messagesToUnmark.length} 條）-----`);
+      messagesToUnmark.forEach((m, idx) => {
+        console.log(`🐛 [DEBUG]   標回 ${idx + 1}. id=${m.id} [${m.role}] 原 summaryId=${m.summaryId} | ${m.text.substring(0, 30)}...`);
+      });
+
+      // 【順序關鍵】先刪 Qdrant 摘要（失敗拋錯中止，DB 完好），成功後才動 DB
+      console.log(`🐛 [DEBUG] 步驟 1/3: 呼叫 ai-service 刪除 Qdrant 摘要...`);
+      await serviceClient.deleteSummaries(conversationId, summaryIdsToDelete);
+      console.log(`🐛 [DEBUG] 步驟 1/3 ✅ Qdrant 摘要已刪除: ${summaryIdsToDelete.join(', ')}`);
+
+      // 標回未摘要（之後累積夠了會再次被摘要）
+      console.log(`🐛 [DEBUG] 步驟 2/3: 標回未摘要...`);
+      for (const msg of messagesToUnmark) {
+        await messageRepository.update(msg.id, { summarized: false, summaryId: null });
+        console.log(`🐛 [DEBUG]   ✅ id=${msg.id} → summarized=false, summaryId=null`);
+      }
+    } else {
+      console.log(`🐛 [DEBUG] 刪除範圍不涉及任何摘要（summaryId 皆為 null），跳過記憶清理`);
+      console.log(`🐛 [DEBUG] 步驟 1/3、2/3 跳過`);
+    }
+
+    console.log(`🐛 [DEBUG] 步驟 3/3: 刪除 DB 訊息...`);
+    const result = await messageRepository.deleteManyByIds(idsToDelete);
+    console.log(`🐛 [DEBUG] 步驟 3/3 ✅ 已刪除 ${result.count} 條訊息`);
+    console.log(`🗑️ [conversationService] ===== 回溯刪除完成 =====\n`);
+
+    // 清除該聊天室的舊生成狀態（completed/failed 已無意義）
+    aiGenerationStatus.delete(conversationId);
+
+    return {
+      deletedCount: result.count,
+      deletedIds: idsToDelete,
     };
   },
 

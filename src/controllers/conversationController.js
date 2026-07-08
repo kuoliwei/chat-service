@@ -119,11 +119,13 @@ export const conversationController = {
     try {
       const userId = req.headers['x-user-id'];
       const { conversationId } = req.params;
-      const { text } = req.body;
+      // 🆕 tempUserId：前端樂觀更新的臨時訊息 ID，生成成功後用於配對真實 ID
+      const { text, tempUserId } = req.body;
 
       console.log(`📤 [conversationController] POST /conversations/${conversationId}/messages`);
+      console.log(`🐛 [DEBUG] 收到前端臨時 ID: tempUserId=${tempUserId || '(未提供)'}`);
 
-      const result = await conversationService.sendMessageToConversation(userId, conversationId, text);
+      const result = await conversationService.sendMessageToConversation(userId, conversationId, text, tempUserId);
 
       return res.status(201).json(result);
     } catch (error) {
@@ -139,6 +141,10 @@ export const conversationController = {
       }
       if (error.message === 'FORBIDDEN') {
         return res.status(403).json({ message: 'Access denied' });
+      }
+      // 🆕 【並行防護】同一聊天室已有 AI 生成任務進行中 → 409 Conflict
+      if (error.message === 'AI_GENERATION_IN_PROGRESS') {
+        return res.status(409).json({ message: '上一條訊息仍在處理中，請等待回覆完成後再發送' });
       }
       // 🆕 AI Service 不可用（包含具體錯誤信息）
       if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
@@ -328,6 +334,122 @@ export const conversationController = {
     }
   },
 
+  // 🆕 【主角人設】讀取主角名稱與背景
+  async getProtagonist(req, res) {
+    try {
+      const userId = req.headers['x-user-id'];
+      const { conversationId } = req.params;
+
+      console.log(`👤 [conversationController] GET /conversations/${conversationId}/protagonist`);
+
+      const result = await conversationService.getProtagonist(userId, conversationId);
+
+      return res.status(200).json(result);
+    } catch (error) {
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'MISSING_CONVERSATION_ID') {
+        return res.status(400).json({ message: 'Missing conversationId' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
+
+  // 🆕 【主角人設】更新主角名稱與背景（先更新 RAG 再寫 DB）
+  async updateProtagonist(req, res) {
+    try {
+      const userId = req.headers['x-user-id'];
+      const { conversationId } = req.params;
+      const { protagonistName, protagonistBackground } = req.body;
+
+      console.log(`👤 [conversationController] PUT /conversations/${conversationId}/protagonist`);
+
+      const result = await conversationService.updateProtagonist(
+        userId, conversationId, protagonistName, protagonistBackground
+      );
+
+      return res.status(200).json({ status: 'success', ...result });
+    } catch (error) {
+      console.error('❌ [updateProtagonist] 錯誤:', error.message);
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'MISSING_CONVERSATION_ID') {
+        return res.status(400).json({ message: 'Missing conversationId' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+      // 🆕 RAG 更新失敗（ai-service 不可用等）→ 503，DB 未被修改
+      if (error.message.startsWith('SERVICE_ERROR')) {
+        const specificError = error.message.replace('SERVICE_ERROR: ', '');
+        return res.status(503).json({ message: `主角人設更新失敗: ${specificError}` });
+      }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
+
+  // 🆕 【刪除訊息】刪除指定用戶訊息及其後所有訊息（回溯式刪除）
+  async deleteMessageAndSubsequent(req, res) {
+    try {
+      const userId = req.headers['x-user-id'];
+      const { conversationId, messageId } = req.params;
+
+      console.log(`🗑️ [conversationController] DELETE /conversations/${conversationId}/messages/${messageId}`);
+
+      const result = await conversationService.deleteMessageAndSubsequent(userId, conversationId, messageId);
+
+      return res.status(200).json({
+        status: 'success',
+        deletedCount: result.deletedCount,
+        deletedIds: result.deletedIds,
+      });
+    } catch (error) {
+      console.error('❌ [deleteMessageAndSubsequent] 錯誤:', error.message);
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'MISSING_PARAMS') {
+        return res.status(400).json({ message: 'Missing conversationId or messageId' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      if (error.message === 'MESSAGE_NOT_FOUND') {
+        return res.status(404).json({ message: 'Message not found' });
+      }
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+      if (error.message === 'NOT_USER_MESSAGE') {
+        return res.status(400).json({ message: '只能刪除自己發出的訊息' });
+      }
+      // 🆕 生成中拒絕刪除 → 409，前端顯示懸浮通知
+      if (error.message === 'AI_GENERATION_IN_PROGRESS') {
+        return res.status(409).json({ message: 'AI 正在回覆中，請等待回覆完成後再刪除' });
+      }
+      // 🆕 摘要刪除失敗（RAG 不可用等）→ 503，訊息未被刪除
+      if (error.message.startsWith('SERVICE_ERROR')) {
+        const specificError = error.message.replace('SERVICE_ERROR: ', '');
+        return res.status(503).json({ message: `記憶清理失敗，訊息未刪除: ${specificError}` });
+      }
+      console.error('❌ [conversationController]', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  },
+
   // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
   async getMessageById(req, res) {
     try {
@@ -386,6 +508,11 @@ export const conversationController = {
       console.log(`📊 [conversationController] GET /conversations/${conversationId}/ai-generation-status`);
 
       const status = conversationService.getAIGenerationStatus(conversationId);
+
+      // 🐛 【DEBUG】completed 時印出回傳給前端的完整配對資訊
+      if (status && status.status === 'completed') {
+        console.log(`🐛 [DEBUG] 回傳 completed 狀態給前端: ${JSON.stringify(status)}`);
+      }
 
       return res.status(200).json(status);
     } catch (error) {

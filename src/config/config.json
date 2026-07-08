@@ -15,8 +15,8 @@
     "threshold": 0.7
   },
   "summary": {
-    "threshold": 100,
-    "maxWords": 10,
+    "threshold": 200,
+    "maxWords": 20,
     "shortTermLimit": 2
   }
 }

@@ -25,6 +25,10 @@ model Conversation {
   characterOpening      String?
   characterFewShots     String?   // JSON 字符串
 
+  // 🆕 主角人設（使用者扮演的主人公，針對個別聊天室設定，預設空白不強制）
+  protagonistName       String?
+  protagonistBackground String?
+
   // 一對多關聯：一個對話有多條訊息
   messages    Message[]
 
@@ -39,6 +43,7 @@ model Message {
   text           String
   status         String       @default("completed")  // "pending" or "completed"
   summarized     Boolean      @default(false)        // 是否已被製作成歷史摘要
+  summaryId      String?                             // 🆕 涵蓋此訊息的摘要 ID（= Qdrant point id，未摘要為 null）
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

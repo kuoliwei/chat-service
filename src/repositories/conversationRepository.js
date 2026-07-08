@@ -87,4 +87,11 @@ export const messageRepository = {
       where: { id },
     });
   },
+
+  // 🆕 批量刪除指定 ID 的訊息（用於「刪除訊息及其後所有訊息」）
+  async deleteManyByIds(ids) {
+    return await prisma.message.deleteMany({
+      where: { id: { in: ids } },
+    });
+  },
 };

@@ -39,6 +39,9 @@ app.post('/api/v1/conversations/character/:characterId/messages', authMiddleware
 // 【查詢訊息】查詢單一訊息（用於輪詢 AI 完成狀態）
 app.get('/api/v1/conversations/:conversationId/messages/:messageId', authMiddleware, conversationController.getMessageById);
 
+// 🆕 【刪除訊息】刪除指定用戶訊息及其後所有訊息（回溯式刪除）
+app.delete('/api/v1/conversations/:conversationId/messages/:messageId', authMiddleware, conversationController.deleteMessageAndSubsequent);
+
 // 【發送訊息】直接發送訊息到指定對話
 app.post('/api/v1/conversations/:conversationId/messages', authMiddleware, conversationController.sendMessageToConversation);
 
@@ -56,6 +59,10 @@ app.post('/api/v1/conversations/:conversationId/restart', authMiddleware, conver
 
 // 🆕 【重試建立聊天室】清除失敗狀態，允許重新開始
 app.post('/api/v1/conversations/character/:characterId/retry', authMiddleware, conversationController.retryConversationCreation);
+
+// 🆕 【主角人設】讀取/更新聊天室的主角（主人公）名稱與背景
+app.get('/api/v1/conversations/:conversationId/protagonist', authMiddleware, conversationController.getProtagonist);
+app.put('/api/v1/conversations/:conversationId/protagonist', authMiddleware, conversationController.updateProtagonist);
 
 // 🆕 【查詢 AI 生成狀態】查詢 AI 回應是否失敗（用於前端輪詢失敗檢測）
 app.get('/api/v1/conversations/:conversationId/ai-generation-status', authMiddleware, conversationController.getAIGenerationStatus);
