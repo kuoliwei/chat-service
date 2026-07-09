@@ -275,64 +275,7 @@ export const conversationController = {
     }
   },
 
-  async restartConversation(req, res) {
-    try {
-      const userId = req.headers['x-user-id'];
-      const { characterId } = req.params;
-
-      console.log(`🔄 [conversationController] POST /conversations/character/${characterId}/restart`);
-
-      const result = await conversationService.restartConversation(userId, characterId);
-
-      return res.status(200).json({
-        status: 'success',
-        data: result,
-      });
-    } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ status: 'error', message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CHARACTER_ID') {
-        return res.status(400).json({ status: 'error', message: 'Missing characterId' });
-      }
-      if (error.message === 'CHARACTER_NOT_FOUND') {
-        return res.status(404).json({ status: 'error', message: 'Character not found' });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ status: 'error', message: 'Internal server error' });
-    }
-  },
-
-  async restartConversationById(req, res) {
-    try {
-      const userId = req.headers['x-user-id'];
-      const { conversationId } = req.params;
-
-      console.log(`🔄 [conversationController] POST /conversations/${conversationId}/restart`);
-
-      const result = await conversationService.restartConversationById(userId, conversationId);
-
-      return res.status(200).json({
-        status: 'success',
-        data: result,
-      });
-    } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ status: 'error', message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ status: 'error', message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ status: 'error', message: 'Conversation not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ status: 'error', message: 'Access denied' });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ status: 'error', message: 'Internal server error' });
-    }
-  },
+  // 🆕 重啟聊天室已改由前端複用「刪除 + 建立」既有管線，restartConversation/restartConversationById 已移除
 
   // 🆕 【主角人設】讀取主角名稱與背景
   async getProtagonist(req, res) {

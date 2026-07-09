@@ -51,11 +51,7 @@ app.delete('/api/v1/conversations/:conversationId', authMiddleware, conversation
 // 【刪除角色對話】刪除該角色的所有對話
 app.delete('/api/v1/conversations/character/:characterId', authMiddleware, conversationController.deleteConversationsByCharacter);
 
-// 【重啟聊天室】根據 characterId 找到使用者與該角色的最新聊天室，刪除後建立新聊天室
-app.post('/api/v1/conversations/character/:characterId/restart', authMiddleware, conversationController.restartConversation);
-
-// 【重啟聊天室】直接用 conversationId 刪除並建立新聊天室（推薦：前端已有 ID）
-app.post('/api/v1/conversations/:conversationId/restart', authMiddleware, conversationController.restartConversationById);
+// 🆕 重啟聊天室已改由前端複用「刪除 + 建立」既有管線，專用 restart 端點已移除
 
 // 🆕 【重試建立聊天室】清除失敗狀態，允許重新開始
 app.post('/api/v1/conversations/character/:characterId/retry', authMiddleware, conversationController.retryConversationCreation);

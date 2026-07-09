@@ -306,58 +306,8 @@ async function _prepareAndCreateConversation(userId, characterId, character, job
   }
 }
 
-/**
- * 創建新對話的內部函數
- * @param {string} userId - 用戶 ID
- * @param {string} characterId - 角色 ID
- * @param {Object} character - 角色信息
- * @returns {Promise<Object>} 包含 id、messages 等的對話對象
- */
-async function createNewConversation(userId, characterId, character) {
-  const conversationId = generateConversationId();
-
-  console.log(`  ├─ 📝 創建新對話: ${conversationId}`);
-
-  // 寫入 DB
-  await conversationRepository.create({
-    id: conversationId,
-    userId,
-    characterId,
-    title: null,
-    characterName: character.name,
-    characterGender: character.gender,
-    characterTags: JSON.stringify(character.tags || []),
-    characterIntroduction: character.introduction,
-    characterBackground: character.background,
-    characterOpening: character.opening,
-    characterFewShots: JSON.stringify(character.fewShots || []),
-  });
-
-  const messages = [];
-
-  // 保存開場白（如果有）
-  if (character.opening) {
-    const openingMessage = await messageRepository.create({
-      conversationId,
-      role: 'assistant',
-      text: character.opening,
-    });
-    messages.push(openingMessage);
-    console.log(`  ├─ 💬 開場白已保存`);
-  }
-
-  console.log(`  ✅ 新對話創建完成: ${conversationId}`);
-
-  return {
-    id: conversationId,
-    userId,
-    characterId,
-    title: null,
-    messages,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
-}
+// 🆕 createNewConversation（不含 RAG 初始化的舊建立函數）已隨 restart 專用管線一併移除
+// 建立聊天室一律走 _prepareAndCreateConversation（含 RAG 初始化）
 
 // 🆕 請求追蹤計數器（用於識別並發請求）
 let requestCounter = 0;
@@ -935,85 +885,8 @@ export const conversationService = {
     };
   },
 
-  async restartConversation(userId, characterId) {
-    validateUserId(userId);
-
-    if (!characterId) {
-      throw new Error('MISSING_CHARACTER_ID');
-    }
-
-    // 驗證角色是否存在
-    console.log(`🔄 [conversationService] 重啟對話: userId=${userId}, characterId=${characterId}`);
-    const character = await serviceClient.getCharacter(characterId);
-
-    // 1. 查詢該用戶與該角色的最新對話
-    const existingConversation = await conversationRepository.findFirst({
-      userId,
-      characterId,
-    });
-
-    // 2. 如果存在，刪除舊對話
-    if (existingConversation) {
-      console.log(`🗑️ [conversationService] 刪除舊對話: ${existingConversation.id}`);
-      await conversationRepository.delete(existingConversation.id);
-    }
-
-    // 3. 建立新對話
-    const newConversation = await createNewConversation(userId, characterId, character);
-
-    console.log(`✅ [conversationService] 重啟完成，新對話 ID: ${newConversation.id}`);
-
-    return {
-      conversationId: newConversation.id,
-      messages: newConversation.messages,
-      title: newConversation.title,
-      createdAt: newConversation.createdAt,
-      updatedAt: newConversation.updatedAt,
-    };
-  },
-
-  async restartConversationById(userId, conversationId) {
-    validateUserId(userId);
-
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
-
-    // 🆕 查詢指定的對話
-    const conversation = await conversationRepository.findFirst({
-      id: conversationId,
-    });
-
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-
-    // 驗證所有權
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
-    }
-
-    // 1. 獲取角色信息（用於快照）
-    console.log(`🔄 [conversationService] 直接重啟對話: conversationId=${conversationId}`);
-    const character = await serviceClient.getCharacter(conversation.characterId, userId);
-
-    // 2. 刪除舊對話
-    console.log(`🗑️ [conversationService] 刪除舊對話: ${conversationId}`);
-    await conversationRepository.delete(conversationId);
-
-    // 3. 建立新對話
-    const newConversation = await createNewConversation(userId, conversation.characterId, character);
-
-    console.log(`✅ [conversationService] 重啟完成，新對話 ID: ${newConversation.id}`);
-
-    return {
-      conversationId: newConversation.id,
-      messages: newConversation.messages,
-      title: newConversation.title,
-      createdAt: newConversation.createdAt,
-      updatedAt: newConversation.updatedAt,
-    };
-  },
+  // 🆕 重啟聊天室已改由前端複用「刪除 + 建立」既有管線，
+  // restartConversation / restartConversationById（不清 RAG、不初始化 RAG 的舊管線）已移除
 
   // 🆕 【主角人設】讀取聊天室的主角名稱與背景
   async getProtagonist(userId, conversationId) {
