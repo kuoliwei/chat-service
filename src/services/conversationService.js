@@ -93,12 +93,10 @@ async function buildAIServiceRequest(conversationId, conversation, messages) {
     tags: conversation.characterTags ? JSON.parse(conversation.characterTags) : []
   };
 
-  // 2. 提取最近 N 條訊息（根據 config）
-  const maxMessages = config.ai.contextWindow.maxMessages;
-  const recentMessages = messages.slice(-maxMessages);
-
-  // 3. 轉換成請求格式（只需要 role 和 text）
-  const conversationHistory = recentMessages.map(msg => ({
+  // 2. 轉換成請求格式（只需要 role 和 text）
+  //    直接送全部傳入的訊息（即未摘要訊息）——短期記憶窗口完全由摘要機制決定，
+  //    不再額外截斷（原 maxMessages/slice 機制已移除）
+  const conversationHistory = messages.map(msg => ({
     role: msg.role,
     text: msg.text
   }));
@@ -155,8 +153,26 @@ async function executeSummary(conversationId, messagesToSummarize) {
   });
 
   // 2. 調用 ai-service 生成摘要
+  // 🆕 提示詞使用英文（模型對英文指令服從度較高）、markdown 結構化；中文對照如下：
+  //   # 請將以下對話總結為約 ${maxWords} 字的摘要。
+  //   ## 撰寫規則
+  //   - 以第三人稱方式撰寫。
+  //   - 內容需要包含關鍵情節。
+  //   - 最後需要用一句話特別記錄角色對使用者的好感度如何。
+  //   - 請使用對話中使用的語言進行總結。
+  //   ## 對話內容
+  //   {對話}
   const summaryConfig = config.summary;
-  const summaryPrompt = `請將以下對話內容縮減為一段 ${summaryConfig.maxWords} 字以內的摘要，保留關鍵事實。請使用對話中使用的語言進行總結：\n\n${textToSummarize}`;
+  const summaryPrompt = `# Summarize the following conversation into a summary of approximately ${summaryConfig.maxWords} words.
+
+## Writing Rules
+- Write in the third person.
+- Include the key plot points.
+- End with one sentence specifically noting the character's affinity toward the user.
+- Summarize in the same language used in the conversation.
+
+## Conversation
+${textToSummarize}`;
 
   console.log(`  ├── 🔄 呼叫 ai-service 生成摘要...`);
   const summaryResult = await serviceClient.generateSummary(conversationId, summaryPrompt);
@@ -390,75 +406,14 @@ export const conversationService = {
       }
 
       if (job.status === 'preparing') {
-        // job 準備中 → 主動查詢 ai-service 的 RAG 初始化狀態
-        console.log(`  ├─ 【請求 #${requestId}】🔄 job 準備中，攔截該請求，查詢 ai-service RAG 狀態...`);
-        try {
-          const ragStatus = await serviceClient.checkRAGStatus(job.conversationId);
-          console.log(`  ├─ RAG 狀態: ${ragStatus}`);
-
-          if (ragStatus === 'ready') {
-            // RAG 已完成 → 現在寫入 DB
-            console.log(`  ├─ RAG 初始化完成，開始寫入 DB`);
-            await conversationRepository.create({
-              id: job.conversationId,
-              userId,
-              characterId,
-              title: null,
-              characterName: character.name,
-              characterGender: character.gender,
-              characterTags: JSON.stringify(character.tags || []),
-              characterIntroduction: character.introduction,
-              characterBackground: character.background,
-              characterOpening: character.opening,
-              characterFewShots: JSON.stringify(character.fewShots || []),
-            });
-            console.log(`  ├─ 聊天室記錄已寫入 DB`);
-
-            // 保存開場白
-            if (character.opening) {
-              await messageRepository.create({
-                conversationId: job.conversationId,
-                role: 'assistant',
-                text: character.opening,
-              });
-              console.log(`  ├─ 開場白已保存`);
-            }
-
-            // 成功：清除 job、查詢完整聊天室資料、回傳 ready
-            creationJobs.delete(jobKey);
-            const completeConversation = await conversationRepository.findFirst(
-              { id: job.conversationId },
-              { messages: { orderBy: { createdAt: 'asc' } } }
-            );
-
-            console.log(`  ✅ 聊天室建立完成: conversationId=${completeConversation.id}\n`);
-            return {
-              status: 'ready',
-              conversationId: completeConversation.id,
-              messages: completeConversation.messages || [],
-              title: completeConversation.title,
-              createdAt: completeConversation.createdAt,
-              updatedAt: completeConversation.updatedAt,
-            };
-          }
-
-          if (ragStatus === 'failed') {
-            // RAG 初始化失敗
-            console.log(`  ├─ RAG 初始化失敗`);
-            creationJobs.set(jobKey, { status: 'failed', error: 'RAG initialization failed' });
-            return { status: 'failed', message: 'RAG initialization failed' };
-          }
-
-          // pending → 仍在初始化中
-          console.log(`  ├─ RAG 仍在初始化中，回傳 preparing`);
-          return { status: 'preparing' };
-
-        } catch (error) {
-          console.error(`  ├─ 查詢 RAG 狀態失敗: ${error.message}`);
-          // 查詢失敗不急著標記失敗，可能只是暫時網絡問題，維持 preparing
-          console.log(`  ├─ 維持 preparing，下次輪詢重試`);
-          return { status: 'preparing' };
-        }
+        // 🆕 【單一寫入者設計】輪詢不再查 RAG、也不寫 DB——這些全由背景任務
+        //    _prepareAndCreateConversation 包辦（等 RAG → 寫 DB → 標記 job）。
+        //    輪詢只需回報「還在準備中」，讓前端繼續輪詢：
+        //      - 背景任務完成 → 寫好 DB + job='ready' → 下一輪由【步驟 1 查現有對話】查到 → 回 ready
+        //      - 背景任務失敗 → job='failed' → 由上面的 failed 分支回 failed
+        //    （移除舊的「輪詢也寫 DB」邏輯，避免與背景任務雙重寫入撞 unique constraint）
+        console.log(`  ├─ 【請求 #${requestId}】🔄 job 準備中，背景任務處理中，回傳 preparing`);
+        return { status: 'preparing' };
       }
     }
 

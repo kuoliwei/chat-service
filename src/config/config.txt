@@ -8,53 +8,29 @@ Chat-Service 配置說明 (config.json)
   // ========================================
   "ai": {
 
-    // 對話上下文設定
-    "contextWindow": {
-      // 發送給 AI 時，最多包含的歷史訊息數
-      // 例: 設為 10，則發送最近 10 條訊息作為對話歷史
-      // 用途: 平衡上下文豐富度 vs 速度
-      "maxMessages": 10,
-
-      // 訊息中是否包含元數據（時間戳、ID 等）
-      // 目前未實現，固定為 false
-      "includeMetadata": false
-    },
-
     // 各種操作的超時時間（單位: 毫秒）
     "timeouts": {
-      // AI 生成回覆的最大等待時間
-      // 超過時間會拋錯誤
-      // 位置: serviceClient.js - generateResponse()
-      "generateResponse": 30000,
+      // AI 生成回覆 / 摘要 / 存入摘要的最大等待時間
+      // 超過時間 axios 會拋錯（被動報錯，中斷流程）
+      // 位置: serviceClient.js - generateResponse() / generateSummary() / addSummary()
+      "generateResponse": 120000,
 
-      // RAG 初始化的最大等待時間
-      // 建立新聊天室時的超時限制
-      // ⚠️ 目前已移除此 timeout，改為無限等待
-      // 位置: serviceClient.js - initializeRAG()
+      // RAG 初始化的最大等待時間（建立新聊天室時）
+      // 位置: serviceClient.js - initializeRAG() / updateProtagonistRAG()
       "initializeRAG": 30000,
 
-      // 清理 RAG 資料的最大等待時間
-      // 刪除聊天室時的超時限制
-      // 位置: serviceClient.js - cleanupRAG()
+      // 清理 RAG 資料的最大等待時間（刪除聊天室 / 刪除摘要時）
+      // 位置: serviceClient.js - cleanupRAG() / deleteSummaries()
       "cleanupRAG": 10000
     }
   },
 
   // ========================================
-  // RAG 檢索設定
+  // RAG 檢索設定（註：實際的檢索數量在 ai-service 的 config，
+  //   此處參數目前 chat-service 未使用，保留備查）
   // ========================================
   "rag": {
-    // 語義搜尋返回的結果數量
-    // 檢索背景或 few-shot 範例時，最多返回 3 條最相關的結果
-    // 值越大 = 資訊越多但檢索時間增加
-    // 值越小 = 檢索快但可能丟失相關資訊
     "topK": 3,
-
-    // 搜尋結果的相似度閾值 (0-1)
-    // 只返回相似度 ≥ 0.7 的結果
-    // 0.7 = 70% 相似度以上才算有用
-    // 值越高 = 篩選越嚴格（只要最相關的）
-    // 值越低 = 包含更多可能相關的結果
     "threshold": 0.7
   },
 
@@ -63,29 +39,23 @@ Chat-Service 配置說明 (config.json)
   // ========================================
   "summary": {
     // 觸發摘要機制的字數閾值
-    // 當對話歷史（除去最新 shortTermLimit 條訊息後）超過 500 字時，觸發摘要
+    // 當「未摘要訊息（排除最新 shortTermLimit 條後）」的總字數 >= 200 時，觸發摘要
     // 流程:
-    //   1. 檢查舊訊息總字數 > 500？
-    //   2. 如果是 → 將舊訊息摘要成 maxWords 字
-    //   3. 保留最新 shortTermLimit 條訊息原文
+    //   1. 撈出全部未摘要訊息
+    //   2. 排除最新 shortTermLimit 條，其餘為候選
+    //   3. 候選訊息總字數 >= threshold？是 → 摘要候選、標記為已摘要（記 summaryId）
     // 位置: conversationService.js - checkIfNeedsSummary()
-    "threshold": 500,
+    "threshold": 200,
 
-    // 生成的摘要最多多少字
-    // AI 生成摘要時，會被要求控制在 30 字以內
-    // 位置: conversationService.js - triggerSummary()
-    "maxWords": 30,
+    // 生成的摘要最多多少字（AI 生成摘要時被要求控制的上限）
+    // 位置: conversationService.js - executeSummary()
+    "maxWords": 20,
 
-    // 摘要機制中不被摘要的最新訊息數
-    // 保留最新 2 條訊息的原文，只摘要更早的訊息
-    // 例: 有 10 條訊息 → 只摘要前 8 條，保留最新 2 條
-    // 用途: 保留最近的聊天上下文完整性
+    // 摘要機制中不被摘要、保留原文的最新訊息數
+    // 例: 未摘要有 8 條 → 只摘要前 6 條，保留最新 2 條原文
+    // 這批「未摘要訊息」即短期記憶窗口，會完整送給模型（不再額外截斷）
     // 位置: conversationService.js - checkIfNeedsSummary()
-    "shortTermLimit": 2,
-
-    // 摘要相關的參數
-    // 目前用途不明確
-    "topK": 2
+    "shortTermLimit": 2
   }
 }
 
@@ -94,40 +64,38 @@ Chat-Service 配置說明 (config.json)
 ========================================
 
 【場景 1】用戶發送新訊息
-  1. 系統取最近 10 條訊息 (maxMessages)
-  2. 檢查是否需要摘要 (threshold > 500?)
-  3. 發送給 AI，超時 30 秒 (generateResponse)
-  4. AI 回覆
+  1. 撈出全部未摘要訊息
+  2. 檢查是否需要摘要（候選字數 >= threshold?），需要就先摘要
+  3. 把「全部未摘要訊息 + 新訊息」送給 AI（短期記憶，不截斷）
+     ＋ RAG 檢索的角色背景 / few-shot / 主角背景 / 歷史摘要
+  4. AI 回覆，超時 120 秒（generateResponse）
+  5. 成功才原子性存入用戶訊息 + AI 回覆
 
 【場景 2】對話過長（需要摘要）
-  對話有 15 條訊息，總字數 800 字
-  1. 檢查: 800 > 500? 是 → 需要摘要
-  2. 保留最新 2 條訊息（原文）
-  3. 摘要前 13 條訊息為 ≤30 字
-  4. 新對話歷史 = 摘要(30字) + 訊息13號 + 訊息14號 + 訊息15號
+  未摘要訊息候選（排除最新 2 條後）總字數超過 200
+  1. 摘要候選訊息 → 存入 Qdrant（得到 summaryId）
+  2. 候選訊息標記 summarized=true、記下 summaryId
+  3. 短期記憶只剩最新 2 條原文；老訊息改由 RAG 摘要檢索提供
 
-【場景 3】RAG 檢索
+【場景 3】RAG 檢索（實際發生在 ai-service）
   用戶說: "赫蘿，你昨天去哪？"
-  1. 語義搜尋返回最多 3 條結果 (topK=3)
-  2. 篩選相似度 ≥ 0.7 的結果 (threshold=0.7)
-  3. 這些結果放入 AI 的 system prompt
-  4. AI 用檢索結果和上下文生成回覆
+  1. 以當前訊息為索引，語義檢索角色背景 / few-shot / 歷史摘要
+  2. 角色性格描述另以固定語意關鍵詞檢索（不隨當前對話漂移）
+  3. 檢索結果放入 system prompt
+  4. AI 用 system prompt + 未摘要對話生成回覆
 
 ========================================
 修改建議
 ========================================
 
-想提高 AI 回覆的上下文質量？
-  → 增加 ai.contextWindow.maxMessages（如 15）
+想提早觸發摘要（短期記憶保留更少、更快壓縮）？
+  → 減小 summary.threshold（如 100）
 
-想加快回覆速度？
-  → 減小 ai.contextWindow.maxMessages（如 5）
+想讓短期記憶保留更多原文？
+  → 增大 summary.shortTermLimit（如 4）；或增大 threshold 延後摘要
 
-想提早觸發摘要？
-  → 減小 summary.threshold（如 300）
+想讓摘要更精簡 / 更詳細？
+  → 調整 summary.maxWords
 
-想要 RAG 檢索更精準？
-  → 增大 rag.threshold（如 0.8）
-
-想要 RAG 檢索更寬泛？
-  → 減小 rag.threshold（如 0.5）
+模型第一句慢 / 大模型生成久？
+  → 增大 ai.timeouts.generateResponse（並同步前端輪詢上限）

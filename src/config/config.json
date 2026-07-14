@@ -1,11 +1,7 @@
 {
   "ai": {
-    "contextWindow": {
-      "maxMessages": 10,
-      "includeMetadata": false
-    },
     "timeouts": {
-      "generateResponse": 60000,
+      "generateResponse": 120000,
       "initializeRAG": 30000,
       "cleanupRAG": 10000
     }
@@ -15,8 +11,8 @@
     "threshold": 0.7
   },
   "summary": {
-    "threshold": 200,
-    "maxWords": 20,
+    "threshold": 500,
+    "maxWords": 70,
     "shortTermLimit": 2
   }
 }
