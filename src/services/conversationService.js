@@ -16,6 +16,35 @@ function validateUserId(userId) {
   }
 }
 
+// 🆕 【共用擁有權檢查】以 conversationId 為主鍵的方法都必須先過這一關。
+//
+// 背景：以 characterId 為主鍵的方法（如 getMessages）擁有權檢查內建在查詢條件
+// 裡（findFirst({ userId, characterId })），想漏也漏不掉。但以 conversationId
+// 為主鍵的方法只憑主鍵就查得到資料，擁有權得額外寫一行判斷——這裡曾經手刻了
+// 4 次、也漏寫了 4 次（getMessagesByConversationId、getMessageById、
+// getAIGenerationStatus、clearAIGenerationStatus 曾經完全不驗證 userId，
+// 任何登入者都能讀到或清除別人對話的內容）。
+// 集中成一個函式後，之後任何新方法都只有一種寫法可用。
+async function assertConversationOwnership(userId, conversationId) {
+  validateUserId(userId);
+
+  if (!conversationId) {
+    throw new Error('MISSING_CONVERSATION_ID');
+  }
+
+  const conversation = await conversationRepository.findFirst({ id: conversationId });
+
+  if (!conversation) {
+    throw new Error('CONVERSATION_NOT_FOUND');
+  }
+
+  if (conversation.userId !== userId) {
+    throw new Error('FORBIDDEN');
+  }
+
+  return conversation;
+}
+
 /**
  * 計算聊天歷史的總字數（排除最新的 N 條訊息）
  * 注意：傳入的 messages 應該已由資料庫過濾為未摘要的訊息
@@ -522,28 +551,12 @@ export const conversationService = {
 
   // 🆕 tempUserId（可選）：前端臨時訊息 ID，生成成功後放入狀態供前端配對替換
   async sendMessageToConversation(userId, conversationId, text, tempUserId) {
-    validateUserId(userId);
-
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
+    // 先授權再驗輸入：無權存取這個聊天室的人，不該因為送出的內容格式不同
+    // 而收到不一樣的回應（400 vs 403 的差異本身就是一種資訊）。
+    const conversation = await assertConversationOwnership(userId, conversationId);
 
     if (!text) {
       throw new Error('MISSING_TEXT');
-    }
-
-    // 🆕 直接用 conversationId 查詢對話
-    const conversation = await conversationRepository.findFirst({
-      id: conversationId,
-    });
-
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-
-    // 驗證所有權
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
     }
 
     // 🆕 【實驗性註解】暫時停用健檢觸發，觀察無健檢時錯誤是否仍能正確傳播
@@ -734,19 +747,10 @@ export const conversationService = {
     return messages.slice(offset, offset + limit);
   },
 
-  async getMessagesByConversationId(conversationId, limit = 50, offset = 0) {
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
-
-    // 查詢對話是否存在
-    const conversation = await conversationRepository.findFirst({
-      id: conversationId,
-    });
-
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
+  async getMessagesByConversationId(userId, conversationId, limit = 50, offset = 0) {
+    // 🔒 擁有權檢查：修正前這裡只確認 conversationId 存在，沒驗證是否屬於呼叫者，
+    // 任何登入者帶任意 conversationId 都能讀到別人的完整對話內容。
+    const conversation = await assertConversationOwnership(userId, conversationId);
 
     // 查詢訊息
     const messages = await messageRepository.findMany(
@@ -767,24 +771,8 @@ export const conversationService = {
   },
 
   async deleteConversation(userId, conversationId) {
-    validateUserId(userId);
-
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
-
     // 查詢對話是否存在且屬於該用戶
-    const conversation = await conversationRepository.findFirst({
-      id: conversationId,
-    });
-
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
-    }
+    await assertConversationOwnership(userId, conversationId);
 
     // 🆕 【順序調換】先清理 RAG 資料，失敗會拋錯中斷，此時 DB 還完好
     await cleanupConversationRAG(conversationId);
@@ -845,19 +833,7 @@ export const conversationService = {
 
   // 🆕 【主角人設】讀取聊天室的主角名稱與背景
   async getProtagonist(userId, conversationId) {
-    validateUserId(userId);
-
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
-
-    const conversation = await conversationRepository.findFirst({ id: conversationId });
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
-    }
+    const conversation = await assertConversationOwnership(userId, conversationId);
 
     return {
       protagonistName: conversation.protagonistName,
@@ -868,19 +844,7 @@ export const conversationService = {
   // 🆕 【主角人設】更新聊天室的主角名稱與背景
   // 流程：先更新 RAG（背景切片，失敗拋錯中止）→ 成功後才寫 DB（與刪除的順序原則一致）
   async updateProtagonist(userId, conversationId, protagonistName, protagonistBackground) {
-    validateUserId(userId);
-
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
-
-    const conversation = await conversationRepository.findFirst({ id: conversationId });
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
-    }
+    await assertConversationOwnership(userId, conversationId);
 
     console.log(`\n👤 [conversationService] 更新主角人設: conversationId=${conversationId}`);
     console.log(`   ├─ 名稱: ${protagonistName || '(空)'}`);
@@ -906,20 +870,19 @@ export const conversationService = {
   // 🆕 【刪除訊息】刪除指定的用戶訊息及其後所有訊息（回溯式刪除）
   // 語義：對話裁剪回該訊息發出之前的狀態，之後的用戶訊息與 AI 回覆全部刪除
   async deleteMessageAndSubsequent(userId, conversationId, messageId) {
+    // 缺 userId 一律先回 UNAUTHORIZED，維持與其他方法一致的錯誤優先序
+    // （authMiddleware 已保證它存在，這裡是防禦性的第二道）。
     validateUserId(userId);
 
+    // MISSING_PARAMS 涵蓋兩者缺一，順序要在擁有權檢查之前——
+    // 否則 messageId 缺失時會被 assertConversationOwnership 放行，
+    // 誤判成 MESSAGE_NOT_FOUND 而不是「缺少參數」。
     if (!conversationId || !messageId) {
       throw new Error('MISSING_PARAMS');
     }
 
     // 驗證對話存在與所有權
-    const conversation = await conversationRepository.findFirst({ id: conversationId });
-    if (!conversation) {
-      throw new Error('CONVERSATION_NOT_FOUND');
-    }
-    if (conversation.userId !== userId) {
-      throw new Error('FORBIDDEN');
-    }
+    await assertConversationOwnership(userId, conversationId);
 
     // 🆕 【生成中拒絕】AI 正在生成時不允許刪除（生成完成會存入新訊息，會打架）
     const genStatus = aiGenerationStatus.get(conversationId);
@@ -1024,10 +987,14 @@ export const conversationService = {
   },
 
   // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
-  async getMessageById(conversationId, messageId) {
+  async getMessageById(userId, conversationId, messageId) {
     if (!conversationId || !messageId) {
       throw new Error('MISSING_PARAMS');
     }
+
+    // 🔒 擁有權檢查：修正前這裡完全沒驗證 userId，任何登入者帶任意
+    // conversationId/messageId 都能讀到別人單一則訊息的完整內容。
+    await assertConversationOwnership(userId, conversationId);
 
     const message = await messageRepository.findFirst({
       id: messageId,
@@ -1080,10 +1047,10 @@ export const conversationService = {
   },
 
   // 🆕 查詢 AI 生成狀態（成功、失敗、生成中）
-  getAIGenerationStatus(conversationId) {
-    if (!conversationId) {
-      throw new Error('MISSING_CONVERSATION_ID');
-    }
+  // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能查詢別人聊天室的
+  // AI 生成狀態（改成 async 是因為擁有權檢查需要查一次資料庫）。
+  async getAIGenerationStatus(userId, conversationId) {
+    await assertConversationOwnership(userId, conversationId);
 
     const status = aiGenerationStatus.get(conversationId);
 
@@ -1101,7 +1068,11 @@ export const conversationService = {
   },
 
   // 🆕 清除 AI 生成狀態（用戶重試或其他操作後）
-  clearAIGenerationStatus(conversationId) {
+  // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能清除別人聊天室的
+  // AI 生成狀態記錄（改成 async 是因為擁有權檢查需要查一次資料庫）。
+  async clearAIGenerationStatus(userId, conversationId) {
+    await assertConversationOwnership(userId, conversationId);
+
     if (aiGenerationStatus.has(conversationId)) {
       aiGenerationStatus.delete(conversationId);
       console.log(`🗑️ [conversationService] 已清除 AI 生成狀態: conversationId=${conversationId}`);

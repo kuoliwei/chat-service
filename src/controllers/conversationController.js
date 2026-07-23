@@ -185,17 +185,28 @@ export const conversationController = {
 
   async getMessagesByConversationId(req, res) {
     try {
+      const userId = req.headers['x-user-id'];
       const { conversationId } = req.params;
       const { limit = 50, offset = 0 } = req.query;
 
       console.log(`📖 [conversationController] GET /conversations/${conversationId}/messages`);
 
-      const messages = await conversationService.getMessagesByConversationId(conversationId, parseInt(limit), parseInt(offset));
+      const messages = await conversationService.getMessagesByConversationId(userId, conversationId, parseInt(limit), parseInt(offset));
 
       return res.status(200).json(messages);
     } catch (error) {
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'MISSING_CONVERSATION_ID') {
+        return res.status(400).json({ message: 'Missing conversationId' });
+      }
       if (error.message === 'CONVERSATION_NOT_FOUND') {
         return res.status(404).json({ message: 'Conversation not found' });
+      }
+      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
       }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
@@ -396,16 +407,27 @@ export const conversationController = {
   // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
   async getMessageById(req, res) {
     try {
+      const userId = req.headers['x-user-id'];
       const { conversationId, messageId } = req.params;
 
       console.log(`📡 [conversationController] GET /conversations/${conversationId}/messages/${messageId}`);
 
-      const message = await conversationService.getMessageById(conversationId, messageId);
+      const message = await conversationService.getMessageById(userId, conversationId, messageId);
 
       return res.status(200).json(message);
     } catch (error) {
       if (error.message === 'MISSING_PARAMS') {
         return res.status(400).json({ message: 'Missing conversationId or messageId' });
+      }
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
       }
       if (error.message === 'MESSAGE_NOT_FOUND') {
         return res.status(404).json({ message: 'Message not found' });
@@ -446,11 +468,12 @@ export const conversationController = {
   // 🆕 查詢 AI 生成狀態
   async getAIGenerationStatus(req, res) {
     try {
+      const userId = req.headers['x-user-id'];
       const { conversationId } = req.params;
 
       console.log(`📊 [conversationController] GET /conversations/${conversationId}/ai-generation-status`);
 
-      const status = conversationService.getAIGenerationStatus(conversationId);
+      const status = await conversationService.getAIGenerationStatus(userId, conversationId);
 
       // 🐛 【DEBUG】completed 時印出回傳給前端的完整配對資訊
       if (status && status.status === 'completed') {
@@ -459,8 +482,18 @@ export const conversationController = {
 
       return res.status(200).json(status);
     } catch (error) {
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
       if (error.message === 'MISSING_CONVERSATION_ID') {
         return res.status(400).json({ message: 'Missing conversationId' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
       }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
@@ -470,17 +503,31 @@ export const conversationController = {
   // 🆕 清除 AI 生成狀態（用戶重試時）
   async clearAIGenerationStatus(req, res) {
     try {
+      const userId = req.headers['x-user-id'];
       const { conversationId } = req.params;
 
       console.log(`🗑️ [conversationController] DELETE /conversations/${conversationId}/ai-generation-status`);
 
-      conversationService.clearAIGenerationStatus(conversationId);
+      await conversationService.clearAIGenerationStatus(userId, conversationId);
 
       return res.status(200).json({
         status: 'cleared',
         message: 'AI generation status cleared'
       });
     } catch (error) {
+      if (error.message === 'UNAUTHORIZED') {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      if (error.message === 'MISSING_CONVERSATION_ID') {
+        return res.status(400).json({ message: 'Missing conversationId' });
+      }
+      if (error.message === 'CONVERSATION_NOT_FOUND') {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+      // 🔒 修正跨帳號寫入漏洞：conversationId 存在但不屬於呼叫者
+      if (error.message === 'FORBIDDEN') {
+        return res.status(403).json({ message: 'Access denied' });
+      }
       console.error('❌ [conversationController]', error);
       return res.status(500).json({ message: 'Internal server error' });
     }
