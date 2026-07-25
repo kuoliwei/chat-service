@@ -26,27 +26,29 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 ## 目前狀態（已實裝）
 
 - Express 5 + Prisma ORM + SQLite，雙資料模型：Conversation（含角色/主角快照欄位）+ Message
-- 聊天室建立採**非同步 + 輪詢**：`getOrCreateConversation` 先回 `202 preparing`，背景任務 `_prepareAndCreateConversation` 發起 RAG 初始化並輪詢其狀態，完成才寫 DB；記憶體 Map（`creationJobs`）追蹤建立中/失敗狀態
-- 發送訊息也是**非同步**：`sendMessageToConversation` 立即回 `201 accepted`，背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，成功才**原子性**存用戶訊息＋AI 回覆；記憶體 Map（`aiGenerationStatus`）追蹤 generating/completed/failed，供前端輪詢
+- 聊天室建立採**非同步 + 輪詢**：`getOrCreateConversation` 先回 `202 preparing`，背景任務 `_prepareAndCreateConversation` 發起 RAG 初始化並輪詢其狀態，完成才寫 DB；建立中/失敗狀態持久化在 `ConversationCreationJob` 表（`userId`+`characterId` 為主鍵），非記憶體 Map，服務重啟不遺失
+- 發送訊息也是**非同步**：`sendMessageToConversation` 立即回 `201 accepted`，背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，成功才**原子性**存用戶訊息＋AI 回覆；生成中/完成/失敗狀態持久化在 `Conversation` 表的 `generationStatus`/`generationError`/`generationTempUserId`/`generationUserMessageId`/`generationAssistantMessageId`/`generationUpdatedAt` 欄位（透過 `conversationRepository` 讀寫），非記憶體 Map，供前端輪詢；服務重啟後仍可正確恢復（2026-07-26 已透過重啟服務實測驗證，見 K1-K5）
 - 摘要機制：未摘要訊息字數達閾值（`config.summary.threshold`）時，先摘要較舊訊息（呼叫 ai-service 生成摘要 + 存入 Qdrant），標記 `summarized`/`summaryId`，短期記憶只留最新 N 條（`shortTermLimit`）
 - 訊息回溯刪除（`deleteMessageAndSubsequent`）：刪除某則用戶訊息會連帶刪除其後所有訊息；若刪除範圍涉及已摘要訊息，會連動刪除對應 Qdrant 摘要，並把刪除點之前、被同一摘要涵蓋的訊息標回未摘要
 - 對話刪除 / 依角色刪除對話：**先清 RAG（失敗即中斷、DB 不動）→ 成功才刪 DB**
 - 主角人設（使用者扮演角色）讀取/更新，更新採**先寫 RAG 再寫 DB**
 - 「重啟聊天室」已移除專用端點，前端改複用「刪除 + 建立」既有管線
 - 並行防護：同一聊天室已有 AI 生成任務進行中時拒絕新訊息（含殭屍鎖逾時保險）與拒絕刪除訊息
-- 集中的擁有權檢查 `assertConversationOwnership`（`conversationService.js`）：所有以 `conversationId` 為主鍵的方法都先過這關，修正過去 4 處方法各自漏寫 userId 驗證的漏洞（跨帳號讀取/寫入）
+- 集中的擁有權檢查 `assertConversationOwnership`（`conversationService.js`）：所有以 `conversationId` 為主鍵的方法都先過這關，修正過去 4 處方法各自漏寫 userId 驗證的漏洞（跨帳號讀取/寫入）；支援 `{ isInternalRequest }` 選項——gateway 的 `/internal/conversations` 與 `/internal/conversations/:id/messages` 路由轉發過來的內部請求（`x-internal-request: true`）跳過 userId 擁有權比對，供 ai-service 查詢/寫入對話歷史
 - Controller 的錯誤碼→HTTP 映射改用共用 `ERROR_MAP` 查表（與 auth/user/character 三服務風格一致）；`sendMessage`（依 characterId）對話不存在時已統一為 404（原為 400，`simplify-chat-service` 唯一的可觀察行為變更）
 
-### 已知限制（`simplify-chat-service` change 已於 2026-07-25 處理清理項，本輪未處理項如下）
+### 已知限制
 
-- **大量除錯用 `console.log`**（含明顯的 `🐛 [DEBUG]` 前綴），散布在 controller 與 service 全層——本輪確認暫緩，非本輪範圍
-- 記憶體 Map（`creationJobs`、`aiGenerationStatus`）屬進程內狀態，重啟服務即遺失——12-Factor Processes（無狀態）的已知限制，本輪確認不處理（牽涉是否改用持久化儲存的架構決策，影響範圍較大，留待日後獨立評估）
+- **大量除錯用 `console.log`**（含明顯的 `🐛 [DEBUG]` 前綴），散布在 controller 與 service 全層——`simplify-chat-service` change（2026-07-25）確認暫緩，非該輪範圍，目前仍未處理
 - `src/config/config.txt`：`config.json` 的說明文件（非程式碼），內容包含已知未使用的 `rag.topK`/`rag.threshold` 欄位，非本輪範圍
 - `conversationService.js` 直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——JS 環境下屬約定俗成，確認不處理
 
+**已解決（曾是已知限制，現已修正）：**
+- ~~記憶體 Map（`creationJobs`、`aiGenerationStatus`）屬進程內狀態，重啟服務即遺失~~ → 已改為持久化：`ConversationCreationJob` 表 + `Conversation` 表的 `generationStatus` 等欄位（Prisma migration `20260725092955_add_persistent_generation_and_creation_job_state`），2026-07-26 已透過實際重啟服務驗證（K1-K5）狀態正確存活，不再是 12-Factor Processes（無狀態）的違反項
+
 **已清除（本輪處理完成）：**
 - ~~`src/app.js.backup`（舊版 Express app 死代碼）~~ → 已刪除
-- ~~`authMiddleware.js` 寫入的 `req.userId`（無人讀取的死欄位）~~ → 已移除
+- ~~`authMiddleware.js` 寫入的 `req.userId`（無人讀取的死欄位）~~ → 該行已移除，`authMiddleware.js` 本體之後也已整檔刪除（無獨立授權 middleware，改由 service 層 `validateUserId()` 把關）
 - ~~`prisma.config.ts`（已查證 Prisma 5.22 CLI 不讀取，確認為死代碼）~~ → 已刪除
 - ~~`cors()` 允許所有 origin~~ → 已移除（已 grep 前端 `persona-nexus-chat` 確認無啟用中直連路徑）
 - ~~`package.json` 的 `"test": "jest"`（斷掉的 script）~~ → 已移除
@@ -56,7 +58,7 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 ### 公開端點
 - `GET /health` — 健康檢查
 
-### 受保護端點（需 `x-user-id` header，由 gateway 注入）
+### 受保護端點（需 `x-user-id` header，由 gateway 注入；以 `conversationId` 為主鍵的路由另有 gateway `/internal/*` 轉發路徑，帶 `x-internal-request: true` 可跳過擁有權檢查，供 ai-service 呼叫）
 
 **對話管理：**
 - `GET /api/v1/conversations/character/:characterId` — 取得或建立對話（202 preparing / 200 ready / 503 failed，前端輪詢）
@@ -88,8 +90,14 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 - `id`（cuid）、`userId`、`characterId`、`title?`、`createdAt`、`updatedAt`
 - 角色快照（建立時保存，不受角色後續編輯影響）：`characterName`、`characterGender`、`characterTags`（JSON 字串）、`characterIntroduction`、`characterBackground`、`characterOpening`、`characterFewShots`（JSON 字串）
 - 主角人設：`protagonistName?`、`protagonistBackground?`
+- AI 生成狀態（持久化，取代舊版記憶體 Map）：`generationStatus?`（`generating`/`completed`/`failed`）、`generationError?`、`generationTempUserId?`、`generationUserMessageId?`、`generationAssistantMessageId?`、`generationUpdatedAt?`；`generating` 同時兼作並行生成鎖
 - 一對多：`messages`
 - 索引：`userId`、`characterId`
+
+### ConversationCreationJob 表
+- 主鍵：`userId` + `characterId`（同一用戶對同一角色同時只會有一個建立中的 job）
+- `status`（`preparing`/`failed`）、`conversationId?`（已產生、準備寫入的對話 ID）、`error?`、`createdAt`、`updatedAt`
+- 追蹤 `getOrCreateConversation` 背景建立流程的狀態，取代舊版記憶體 Map `creationJobs`；聊天室成功寫入 `Conversation` 後這筆 job 記錄會被刪除（DB 有 Conversation 記錄即代表已就緒，不需額外的 `ready` 中繼狀態）
 
 ### Message 表
 - `id`（cuid）、`conversationId`、`role`（"user"|"assistant"）、`text`
@@ -102,12 +110,13 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 ## 認證流程
 
 1. 前端發送請求 → api-gateway (port 8000) 驗證 JWT → 注入 `x-user-id` header → 轉發 chat-service
-2. chat-service 信任 `x-user-id` header，不再驗證 JWT（`authMiddleware.js`）
-3. chat-service 呼叫 ai-service / character-service 一律經 gateway 的 `/internal/*` 路由（`serviceClient.js`），必要時把 `x-user-id` 一併轉傳
+2. chat-service 信任 `x-user-id` header，不驗證 JWT；沒有獨立的授權 middleware（`authMiddleware.js` 已刪除），唯一的檢查是 service 層內的 `validateUserId()`（缺 `x-user-id` 拋 `UNAUTHORIZED` → 401）
+3. gateway 另有 `/internal/conversations` 與 `/internal/conversations/:id/messages` 路由，供 ai-service 等內部服務呼叫；這類請求帶 `x-internal-request: true` header，`assertConversationOwnership()` 見到此旗標會跳過 userId 擁有權比對
+4. chat-service 呼叫 ai-service / character-service 一律經 gateway 的 `/internal/*` 路由（`serviceClient.js`），必要時把 `x-user-id` 一併轉傳
 
 ## 演進歷史（節錄自 git log）
 
-依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25，本次優化）
+依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25）→ 依《微服務架構準則/實作spec》平台級稽核後修正（合併授權邏輯、刪除 `authMiddleware.js`、新增 `x-internal-request` 內部路由支援、`creationJobs`/`aiGenerationStatus` 記憶體 Map 全面改為 Prisma 持久化，commit `b509562`，2026-07-25～26，含重啟服務實測驗證）
 
 ## 現況補充
 

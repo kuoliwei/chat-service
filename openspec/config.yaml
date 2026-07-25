@@ -16,23 +16,26 @@ context: |
   Node.js（ESM）／ Express 5 ／ Prisma 5（`@prisma/adapter-libsql`）／ SQLite ／ axios（服務間呼叫）。
   ⚠️ `package.json` 的 `"test": "jest"` 是斷的——jest 未安裝，且沒有任何 `*.test.js`，目前零自動化測試。
 
-  ### 當前架構（三層 + 內存狀態）
+  ### 當前架構（三層 + 持久化狀態）
   ```
-  瀏覽器 → api-gateway(8000) → chat-service(6000)
+  瀏覽器 → api-gateway(8000) ─┬─ /api/v1/conversations/* ──▶ chat-service(6000)
+  ai-service（經 gateway）  ──┘  /internal/conversations/* ─▶ (x-internal-request: true)
                                     │
-        app.js（路由 + CORS + authMiddleware）
+        app.js（純路由；無 CORS、無獨立授權 middleware——authMiddleware.js 已刪除）
                                     ↓
         controllers/conversationController.js（HTTP 進出、大量 console.log/🐛DEBUG）
                                     ↓
-        services/conversationService.js（業務邏輯 + 2 個內存 Map：
-          creationJobs 追蹤聊天室建立中/失敗狀態、
-          aiGenerationStatus 追蹤 AI 生成中/完成/失敗狀態）
+        services/conversationService.js（業務邏輯；validateUserId() 把關必要授權；
+          assertConversationOwnership({isInternalRequest}) 內部請求跳過擁有權比對；
+          建立中/失敗狀態與 AI 生成中/完成/失敗狀態皆已改為 Prisma 持久化，
+          不再是進程內記憶體 Map，服務重啟不遺失）
                                     ↓
-        repositories/conversationRepository.js（純 Prisma CRUD，conversationRepository + messageRepository）
+        repositories/conversationRepository.js（純 Prisma CRUD，conversationRepository +
+          messageRepository + conversationCreationJobRepository）
                                     ↓
-        lib/prisma.js（PrismaClient，未用 adapter；注意 prisma.config.ts 另定義了 libsql adapter 版但無人 import）
+        lib/prisma.js（PrismaClient，未用 adapter；prisma.config.ts 已刪除）
                                     ↓
-                              SQLite（prisma/dev.db）
+                              SQLite（prisma/dev.db，含 Conversation/ConversationCreationJob/Message）
 
         lib/serviceClient.js（呼叫 ai-service / character-service，一律經 gateway `/internal/*`）
   ```
@@ -43,12 +46,13 @@ context: |
 
   ### 核心資料流程
   1. **建立聊天室**：`getOrCreateConversation` 非同步 + 輪詢模式——先查現有對話，
-     不存在則建立內存 job（`creationJobs`）並 fire-and-forget 背景任務，
-     背景任務發起 ai-service RAG 初始化、輪詢其狀態（最多 120 秒）、成功才寫 DB。
+     不存在則在 `ConversationCreationJob` 表寫入 `preparing` job 並 fire-and-forget 背景任務，
+     背景任務發起 ai-service RAG 初始化、輪詢其狀態（最多 120 秒）、成功才寫 DB（並刪除 job 記錄）。
      前端輪詢同一端點直到 `ready`/`failed`。
   2. **發送訊息（非同步版）**：`sendMessageToConversation` 立即回 202-like `accepted`，
      不即刻存用戶訊息；背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，
-     成功才「原子性」同時存用戶訊息 + AI 回覆；`aiGenerationStatus` Map 記錄狀態供前端輪詢。
+     成功才「原子性」同時存用戶訊息 + AI 回覆；狀態記錄在 `Conversation` 表的
+     `generationStatus` 等欄位，供前端輪詢。
      並行防護：同聊天室已有生成中任務時拒絕新訊息（含逾時視為殭屍鎖的保險機制）。
   3. **摘要機制**：未摘要訊息字數達閾值時，先摘要較舊訊息（呼叫 ai-service 生成 + 存入 Qdrant），
      標記 `summarized`/`summaryId`，短期記憶只留最新 N 條原文。
@@ -64,11 +68,15 @@ context: |
   - ~~`cors()` 允許所有 origin（已 grep 前端確認無啟用中直連路徑）~~ → 已移除。
   - ~~`package.json` 的 `"test": "jest"`（jest 未安裝、無測試檔案，執行必定失敗）~~ → 已移除該 script。
 
-  **本輪未處理（使用者確認暫緩或不處理）：**
+  **`simplify-chat-service`（2026-07-25）當時未處理，後續輪次已解決：**
+  - `creationJobs`、`aiGenerationStatus` 進程內記憶體 Map、服務重啟即遺失狀態——12-Factor
+    Processes（無狀態）的已知限制，該輪確認不處理；之後在平台級稽核中改為 Prisma 持久化
+    （`ConversationCreationJob` 表 + `Conversation` 表的 `generationStatus` 等欄位，commit
+    `b509562`），2026-07-26 已透過實際重啟服務驗證狀態存活，此項已解決。
+
+  **仍未處理（使用者確認暫緩或不處理）：**
   - Controller 與 service 全層仍有大量除錯用 `console.log`（含明顯的 `🐛 [DEBUG]` 前綴）——
-    本輪不處理，暫緩。
-  - `creationJobs`、`aiGenerationStatus` 是進程內記憶體 Map，服務重啟即遺失狀態——12-Factor
-    Processes（無狀態）的已知限制，本輪不處理，牽涉是否改用持久化儲存的架構決策，留待日後獨立評估。
+    暫緩，非架構性問題。
   - `src/config/config.txt`：`config.json` 的純文字說明文件，內容包含已知未使用的
     `rag.topK`/`rag.threshold` 欄位（文件本身已註明「未使用」），非本輪範圍。
   - `conversationService.js` 直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——
@@ -85,10 +93,15 @@ context: |
   `sendMessageToConversation` 一致（本次優化唯一的可觀察行為變更）。
 
   ### 授權模型
-  - Controller 直接信任 gateway 注入的 `x-user-id` header（未驗證，本服務無 JWT 依賴，刻意的架構分工）。
+  - Controller 直接信任 gateway 注入的 `x-user-id` header（未驗證，本服務無 JWT 依賴，刻意的架構分工）；
+    無獨立授權 middleware（`authMiddleware.js` 已刪除），缺 `x-user-id` 由 service 層 `validateUserId()`
+    拋 `UNAUTHORIZED`。
   - 以 `conversationId` 為主鍵的方法，擁有權檢查已集中成 `assertConversationOwnership`
     （`conversationService.js`）——這是本服務先前已修正過的漏洞（曾有 4 處方法完全不驗證
     userId，任何登入者可讀取/清除他人對話資料），修正已隨 commit `01baf9e` 完成、非本輪待辦。
+  - `assertConversationOwnership` 支援 `{ isInternalRequest }`：gateway 轉發的 `/internal/conversations`
+    與 `/internal/conversations/:id/messages` 請求帶 `x-internal-request: true`，跳過 userId 擁有權
+    比對，供 ai-service 查詢/寫入對話歷史（commit `b509562`）。
 
   ### 環境變數
   - `PORT`（預設 6000，有走 env）

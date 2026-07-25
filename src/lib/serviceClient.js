@@ -24,7 +24,7 @@ class ServiceClient {
         {
           timeout: 5000,
           headers: {
-            'x-user-id': userId,  // 🆕 傳遞用戶身份
+            'x-user-id': userId,  // 傳遞用戶身份（內部路由不檢查所有權，僅跳過 visibility 檢查）
           },
         }
       );
