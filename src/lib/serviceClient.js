@@ -29,9 +29,9 @@ class ServiceClient {
         }
       );
 
-      if (response.status === 200 && response.data.status === 'success') {
+      if (response.status === 200) {
         console.log(`✅ [ServiceClient] 角色驗證成功: ${characterId}`);
-        return response.data.data;
+        return response.data;
       } else {
         console.warn(`⚠️ [ServiceClient] 角色不存在: ${characterId}`);
         throw new Error('CHARACTER_NOT_FOUND');
@@ -66,9 +66,9 @@ class ServiceClient {
         { timeout: 5000 }
       );
 
-      if (response.status === 200 && response.data.status === 'success') {
+      if (response.status === 200) {
         console.log(`✅ [ServiceClient] 用戶獲取成功: ${userId}`);
-        return response.data.data;
+        return response.data;
       } else {
         throw new Error('USER_NOT_FOUND');
       }
@@ -161,8 +161,8 @@ class ServiceClient {
         throw new Error('RAG_CLEANUP_FAILED');
       }
     } catch (error) {
-      // 🆕 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
-      const detail = error.response?.data?.detail;
+      // 提取 ai-service 回傳的具體錯誤（message），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.message;
       const errorMessage = detail || error.message;
       console.error(`❌ [ServiceClient] 呼叫 ai-service RAG 清理失敗:`, errorMessage);
       throw new Error(`SERVICE_ERROR: ${errorMessage}`);
@@ -264,8 +264,8 @@ class ServiceClient {
         throw new Error('SUMMARY_STORAGE_FAILED');
       }
     } catch (error) {
-      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
-      const detail = error.response?.data?.detail;
+      // 提取 ai-service 回傳的具體錯誤（message），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.message;
       const errorMessage = detail || error.message;
       console.error(`❌ [ServiceClient] 呼叫 ai-service 存儲摘要失敗:`, errorMessage);
       throw new Error(`SERVICE_ERROR: ${errorMessage}`);
@@ -303,8 +303,8 @@ class ServiceClient {
         throw new Error('SUMMARY_DELETION_FAILED');
       }
     } catch (error) {
-      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
-      const detail = error.response?.data?.detail;
+      // 提取 ai-service 回傳的具體錯誤（message），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.message;
       const errorMessage = detail || error.message;
       console.error(`❌ [ServiceClient] 呼叫 ai-service 刪除摘要失敗:`, errorMessage);
       throw new Error(`SERVICE_ERROR: ${errorMessage}`);
@@ -338,8 +338,8 @@ class ServiceClient {
         throw new Error('PROTAGONIST_RAG_UPDATE_FAILED');
       }
     } catch (error) {
-      // 提取 ai-service 回傳的具體錯誤（detail），而不是 axios 的籠統訊息
-      const detail = error.response?.data?.detail;
+      // 提取 ai-service 回傳的具體錯誤（message），而不是 axios 的籠統訊息
+      const detail = error.response?.data?.message;
       const errorMessage = detail || error.message;
       console.error(`❌ [ServiceClient] 呼叫 ai-service 更新主角背景失敗:`, errorMessage);
       throw new Error(`SERVICE_ERROR: ${errorMessage}`);

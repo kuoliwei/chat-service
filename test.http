@@ -2,11 +2,11 @@
 ### Chat-Service 測試 - 完整流程
 ###
 ### 主要測試：
-### 1. 建立聊天室 + RAG 初始化（202 Accepting + 輪詢）
-### 2. 發送訊息（支持摘要 + AI 生成）
+### 1. 建立聊天室 + RAG 初始化（202 Accepted + 輪詢）
+### 2. 發送訊息到指定對話（非同步：立即 accepted + 背景生成，支援摘要 + AI 生成）
 ### 3. 查詢訊息列表（驗證 AI 回覆）
-### 4. 摘要機制測試（> 500 字觸發）
-### 5. 錯誤處理測試
+### 4. 摘要機制測試（> 200 字觸發，見 config.json）
+### 5. 錯誤處理測試（含 sendMessage 對話不存在時的 404）
 ### 6. 刪除聊天室
 ### ============================================
 
@@ -40,8 +40,8 @@ GET http://localhost:6000/api/v1/conversations
 x-user-id: usr_1781757820005
 
 ###
-### 【5️⃣ 發送訊息】
-### 在建立的聊天室中發送訊息（使用 conversationId，支持完整流程：摘要+AI生成）
+### 【5️⃣ 發送訊息（非同步版，依 conversationId）】
+### 立即回傳 201 { status: "accepted", ... }，AI 回覆於背景生成
 ### ⚠️ 需要先執行【1-2】獲得 conversationId，然後將 conversationId 替換到 URL 中
 POST http://localhost:6000/api/v1/conversations/conv_1782902878477/messages
 x-user-id: usr_1781757820005
@@ -52,6 +52,12 @@ Content-Type: application/json
 }
 
 ###
+### 【5b️⃣ 查詢 AI 生成狀態】
+### 重複執行直到 status 變成 completed（含 userMessageId/assistantMessageId）或 failed
+GET http://localhost:6000/api/v1/conversations/conv_1782902878477/ai-generation-status
+x-user-id: usr_1781757820005
+
+###
 ### 【6️⃣ 獲取對話訊息】
 ### 查詢對話中的所有訊息（包含用戶和 AI 的回覆）
 ### 注意：使用 characterId，不是 conversationId
@@ -60,18 +66,18 @@ x-user-id: usr_1781757820005
 
 ###
 ### 【7️⃣ 發送長訊息 - 測試摘要機制】
-### 需要累積 > 500 字才會觸發摘要
+### 未摘要訊息（排除最新 shortTermLimit 條）字數需 > 200（見 config.json summary.threshold）才會觸發摘要
 ### 可重複執行此區塊多次，每次發送不同的長訊息
 POST http://localhost:6000/api/v1/conversations/conv_1782902878477/messages
 x-user-id: usr_1781757820005
 Content-Type: application/json
 
 {
-  "text": "這是一條很長的訊息，用來測試摘要機制。如果累積的未摘要訊息字數超過 500 字，系統會自動觸發摘要功能。摘要會將舊訊息濃縮，保留最新的 2 條訊息原文。此機制幫助控制對話歷史的長度，避免發送過長的上下文給 AI 模型。請注意這是一條示例長訊息。"
+  "text": "這是一條很長的訊息，用來測試摘要機制。如果累積的未摘要訊息字數超過閾值，系統會自動觸發摘要功能。摘要會將舊訊息濃縮，保留最新的幾條訊息原文。此機制幫助控制對話歷史的長度，避免發送過長的上下文給 AI 模型。請注意這是一條示例長訊息。"
 }
 
 ###
-### 【8️⃣ 測試：缺少必要欄位】
+### 【8️⃣ 測試：缺少必要欄位（非同步端點）】
 ### 應返回 400 Bad Request
 POST http://localhost:6000/api/v1/conversations/conv_1782902069255/messages
 x-user-id: usr_1781757820005
@@ -105,6 +111,30 @@ GET http://localhost:6000/api/v1/conversations/summary
 x-user-id: usr_1781757820005
 
 ###
+### 【1️⃣3️⃣ 測試：sendMessage（同步版，依 characterId）對話不存在 → 404】
+### simplify-chat-service 的唯一行為變更：CONVERSATION_NOT_FOUND 從 400 改為 404
+### 需確保該 userId/characterId 尚無對話（例如剛執行完 1️⃣1️⃣ 之後）
+POST http://localhost:6000/api/v1/conversations/character/char_1782108709056/messages
+x-user-id: usr_1781757820005
+Content-Type: application/json
+
+{
+  "role": "user",
+  "text": "測試對話不存在"
+}
+
+###
+### 【1️⃣4️⃣ 測試：sendMessageToConversation 對話不存在 → 404（比對一致性）】
+### 帶一個不存在的 conversationId
+POST http://localhost:6000/api/v1/conversations/conv_nonexistent/messages
+x-user-id: usr_1781757820005
+Content-Type: application/json
+
+{
+  "text": "測試對話不存在"
+}
+
+###
 ### ============================================
 ### 測試完成
 ###
@@ -113,12 +143,15 @@ x-user-id: usr_1781757820005
 ### 2️⃣  200 OK (ready) 或輪詢多次後成功
 ### 3️⃣  200 OK (對話摘要列表)
 ### 4️⃣  200 OK (完整對話列表)
-### 5️⃣  201 Created (訊息已發送 + AI 佔位訊息)
-### 6️⃣  200 OK (訊息列表)
-### 7️⃣  201 Created (長訊息 - 如果字數達到將觸發摘要)
+### 5️⃣  201 Created { status: "accepted", message: "..." }（AI 回覆背景生成中）
+### 5b️⃣ 200 OK，輪詢直到 status: "completed"（或 "failed"）
+### 6️⃣  200 OK (訊息列表，含 AI 回覆)
+### 7️⃣  201 Created（長訊息 - 如果字數達到閾值將觸發摘要）
 ### 8️⃣  400 Bad Request (缺少欄位)
 ### 9️⃣  404 Not Found (不存在的角色)
 ### 🔟  401 Unauthorized (缺少 header)
 ### 1️⃣1️⃣  200 OK (刪除成功)
 ### 1️⃣2️⃣  200 OK (對話已刪除)
+### 1️⃣3️⃣  404 Not Found { message: "Conversation not found" }（本次優化後的新行為）
+### 1️⃣4️⃣  404 Not Found { message: "Conversation not found" }（與 1️⃣3️⃣ 一致）
 ### ============================================

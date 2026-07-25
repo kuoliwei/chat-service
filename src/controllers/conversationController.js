@@ -1,5 +1,24 @@
 import { conversationService } from '../services/conversationService.js';
 
+// 固定 status + 固定 message 的錯誤碼查表；帶動態內容或依端點語意不同的錯誤碼
+// （AI_GENERATION_IN_PROGRESS、AI_SERVICE_UNAVAILABLE:/SERVICE_ERROR: 前綴等）不納入，維持個別處理
+const ERROR_MAP = {
+  UNAUTHORIZED: { status: 401, message: 'Unauthorized' },
+  MISSING_CHARACTER_ID: { status: 400, message: 'Missing characterId' },
+  MISSING_CONVERSATION_ID: { status: 400, message: 'Missing conversationId' },
+  MISSING_PARAMS: { status: 400, message: 'Missing conversationId or messageId' },
+  MISSING_TEXT: { status: 400, message: 'Invalid request' },
+  INVALID_ROLE: { status: 400, message: 'Invalid request' },
+  CHARACTER_NOT_FOUND: { status: 404, message: 'Character not found' },
+  CONVERSATION_NOT_FOUND: { status: 404, message: 'Conversation not found' },
+  MESSAGE_NOT_FOUND: { status: 404, message: 'Message not found' },
+  FORBIDDEN: { status: 403, message: 'Access denied' },
+  NOT_USER_MESSAGE: { status: 400, message: '只能刪除自己發出的訊息' },
+  NO_FAILED_JOB: { status: 404, message: 'No failed job found for this character' },
+  JOB_NOT_FAILED: { status: 409, message: 'Job is not in failed state' },
+  NO_CONVERSATIONS_FOUND: { status: 404, message: 'No conversations found for this character' },
+};
+
 export const conversationController = {
   async getOrCreateConversation(req, res) {
     try {
@@ -14,6 +33,7 @@ export const conversationController = {
       console.log(`   result.status: ${result.status}`);
 
       // 根據建立狀態回不同 HTTP 碼，供前端輪詢判斷
+      // 注意：result.status 是業務語意欄位（preparing/failed/ready），不是本檔案錯誤格式的 error/message 包裹，維持原樣直接回傳。
       if (result.status === 'preparing') {
         // 202 Accepted：聊天室建立中，前端應繼續輪詢
         console.log(`   → HTTP 202 Accepted (preparing)\n`);
@@ -28,25 +48,20 @@ export const conversationController = {
       console.log(`   → HTTP 200 Ready (conversationId: ${result.conversationId})\n`);
       return res.status(200).json(result);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CHARACTER_ID') {
-        return res.status(400).json({ message: 'Missing characterId' });
-      }
-      if (error.message === 'CHARACTER_NOT_FOUND') {
-        return res.status(404).json({ message: 'Character not found' });
-      }
       if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied to this character' });
+        return res.status(403).json({ error: 'FORBIDDEN', message: 'Access denied to this character' });
       }
       // 🆕 【統一風格】AI Service 不可用（包含具體錯誤信息）
       if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
         const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
-        return res.status(503).json({ message: specificError });
+        return res.status(503).json({ error: 'AI_SERVICE_UNAVAILABLE', message: specificError });
+      }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -60,11 +75,12 @@ export const conversationController = {
 
       return res.status(200).json(conversations);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -78,11 +94,12 @@ export const conversationController = {
 
       return res.status(200).json(summary);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -99,25 +116,19 @@ export const conversationController = {
       return res.status(201).json(message);
     } catch (error) {
       console.error('❌ [sendMessage] 錯誤:', error.message);
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (['MISSING_TEXT', 'INVALID_ROLE', 'CONVERSATION_NOT_FOUND'].includes(error.message)) {
-        const errorMessages = {
-          'MISSING_TEXT': 'Invalid request',
-          'INVALID_ROLE': 'Invalid request',
-          'CONVERSATION_NOT_FOUND': 'Conversation not found'
-        };
-        return res.status(400).json({ message: errorMessages[error.message] || 'Invalid request' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
   async sendMessageToConversation(req, res) {
     try {
       const userId = req.headers['x-user-id'];
+      const isInternalRequest = req.headers['x-internal-request'] === 'true';
       const { conversationId } = req.params;
       // 🆕 tempUserId：前端樂觀更新的臨時訊息 ID，生成成功後用於配對真實 ID
       const { text, tempUserId } = req.body;
@@ -125,38 +136,36 @@ export const conversationController = {
       console.log(`📤 [conversationController] POST /conversations/${conversationId}/messages`);
       console.log(`🐛 [DEBUG] 收到前端臨時 ID: tempUserId=${tempUserId || '(未提供)'}`);
 
-      const result = await conversationService.sendMessageToConversation(userId, conversationId, text, tempUserId);
+      const result = await conversationService.sendMessageToConversation(userId, conversationId, text, tempUserId, { isInternalRequest });
 
       return res.status(201).json(result);
     } catch (error) {
       console.error('❌ [sendMessageToConversation] 錯誤:', error.message);
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
+      // 此端點的 MISSING_CONVERSATION_ID/MISSING_TEXT 訊息與其他方法不同（"Invalid request"），
+      // 不納入共用 ERROR_MAP，維持原樣避免行為變更
       if (['MISSING_CONVERSATION_ID', 'MISSING_TEXT'].includes(error.message)) {
-        return res.status(400).json({ message: 'Invalid request' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
+        return res.status(400).json({ error: error.message, message: 'Invalid request' });
       }
       // 🆕 【並行防護】同一聊天室已有 AI 生成任務進行中 → 409 Conflict
       if (error.message === 'AI_GENERATION_IN_PROGRESS') {
-        return res.status(409).json({ message: '上一條訊息仍在處理中，請等待回覆完成後再發送' });
+        return res.status(409).json({ error: 'AI_GENERATION_IN_PROGRESS', message: '上一條訊息仍在處理中，請等待回覆完成後再發送' });
       }
       // 🆕 AI Service 不可用（包含具體錯誤信息）
       if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
         // 提取具體的錯誤信息（格式：AI_SERVICE_UNAVAILABLE: [具體錯誤]）
         const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
         return res.status(503).json({
+          error: 'AI_SERVICE_UNAVAILABLE',
           message: specificError,
           aiGenerationStatus: { status: 'failed', error: specificError }
         });
       }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
+      }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -172,44 +181,34 @@ export const conversationController = {
 
       return res.status(200).json(messages);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
   async getMessagesByConversationId(req, res) {
     try {
       const userId = req.headers['x-user-id'];
+      const isInternalRequest = req.headers['x-internal-request'] === 'true';
       const { conversationId } = req.params;
       const { limit = 50, offset = 0 } = req.query;
 
       console.log(`📖 [conversationController] GET /conversations/${conversationId}/messages`);
 
-      const messages = await conversationService.getMessagesByConversationId(userId, conversationId, parseInt(limit), parseInt(offset));
+      const messages = await conversationService.getMessagesByConversationId(userId, conversationId, parseInt(limit), parseInt(offset), { isInternalRequest });
 
       return res.status(200).json(messages);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -223,29 +222,21 @@ export const conversationController = {
       const result = await conversationService.deleteConversation(userId, conversationId);
 
       return res.status(200).json({
-        status: 'success',
+        success: true,
         message: result.message,
       });
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ status: 'error', message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ status: 'error', message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ status: 'error', message: 'Conversation not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ status: 'error', message: 'Access denied' });
-      }
       // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
       if (error.message.startsWith('SERVICE_ERROR')) {
         const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ status: 'error', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
+        return res.status(503).json({ error: 'SERVICE_ERROR', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
+      }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ status: 'error', message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -259,30 +250,22 @@ export const conversationController = {
       const result = await conversationService.deleteConversationsByCharacter(userId, characterId);
 
       return res.status(200).json({
-        status: 'success',
+        success: true,
         message: result.message,
         deletedCount: result.deletedCount,
       });
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ status: 'error', message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CHARACTER_ID') {
-        return res.status(400).json({ status: 'error', message: 'Missing characterId' });
-      }
-      if (error.message === 'CHARACTER_NOT_FOUND') {
-        return res.status(404).json({ status: 'error', message: 'Character not found' });
-      }
-      if (error.message === 'NO_CONVERSATIONS_FOUND') {
-        return res.status(404).json({ status: 'error', message: 'No conversations found for this character' });
-      }
       // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
       if (error.message.startsWith('SERVICE_ERROR')) {
         const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ status: 'error', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
+        return res.status(503).json({ error: 'SERVICE_ERROR', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
+      }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ status: 'error', message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -300,20 +283,12 @@ export const conversationController = {
 
       return res.status(200).json(result);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -330,28 +305,20 @@ export const conversationController = {
         userId, conversationId, protagonistName, protagonistBackground
       );
 
-      return res.status(200).json({ status: 'success', ...result });
+      return res.status(200).json(result);
     } catch (error) {
       console.error('❌ [updateProtagonist] 錯誤:', error.message);
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
-      }
       // 🆕 RAG 更新失敗（ai-service 不可用等）→ 503，DB 未被修改
       if (error.message.startsWith('SERVICE_ERROR')) {
         const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ message: `主角人設更新失敗: ${specificError}` });
+        return res.status(503).json({ error: 'SERVICE_ERROR', message: `主角人設更新失敗: ${specificError}` });
+      }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -366,41 +333,28 @@ export const conversationController = {
       const result = await conversationService.deleteMessageAndSubsequent(userId, conversationId, messageId);
 
       return res.status(200).json({
-        status: 'success',
+        success: true,
+        message: `${result.deletedCount} 則訊息已刪除`,
         deletedCount: result.deletedCount,
         deletedIds: result.deletedIds,
       });
     } catch (error) {
       console.error('❌ [deleteMessageAndSubsequent] 錯誤:', error.message);
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_PARAMS') {
-        return res.status(400).json({ message: 'Missing conversationId or messageId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      if (error.message === 'MESSAGE_NOT_FOUND') {
-        return res.status(404).json({ message: 'Message not found' });
-      }
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
-      }
-      if (error.message === 'NOT_USER_MESSAGE') {
-        return res.status(400).json({ message: '只能刪除自己發出的訊息' });
-      }
       // 🆕 生成中拒絕刪除 → 409，前端顯示懸浮通知
       if (error.message === 'AI_GENERATION_IN_PROGRESS') {
-        return res.status(409).json({ message: 'AI 正在回覆中，請等待回覆完成後再刪除' });
+        return res.status(409).json({ error: 'AI_GENERATION_IN_PROGRESS', message: 'AI 正在回覆中，請等待回覆完成後再刪除' });
       }
       // 🆕 摘要刪除失敗（RAG 不可用等）→ 503，訊息未被刪除
       if (error.message.startsWith('SERVICE_ERROR')) {
         const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ message: `記憶清理失敗，訊息未刪除: ${specificError}` });
+        return res.status(503).json({ error: 'SERVICE_ERROR', message: `記憶清理失敗，訊息未刪除: ${specificError}` });
+      }
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -416,24 +370,12 @@ export const conversationController = {
 
       return res.status(200).json(message);
     } catch (error) {
-      if (error.message === 'MISSING_PARAMS') {
-        return res.status(400).json({ message: 'Missing conversationId or messageId' });
-      }
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
-      }
-      if (error.message === 'MESSAGE_NOT_FOUND') {
-        return res.status(404).json({ message: 'Message not found' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -451,17 +393,12 @@ export const conversationController = {
       console.log(`   ✅ 失敗狀態已清除，允許重試\n`);
       return res.status(200).json(result);
     } catch (error) {
-      if (error.message === 'MISSING_CHARACTER_ID') {
-        return res.status(400).json({ message: 'Missing characterId' });
-      }
-      if (error.message === 'NO_FAILED_JOB') {
-        return res.status(404).json({ message: 'No failed job found for this character' });
-      }
-      if (error.message === 'JOB_NOT_FAILED') {
-        return res.status(409).json({ message: 'Job is not in failed state' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -482,21 +419,12 @@ export const conversationController = {
 
       return res.status(200).json(status);
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      // 🔒 修正跨帳號讀取漏洞：conversationId 存在但不屬於呼叫者
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 
@@ -511,25 +439,16 @@ export const conversationController = {
       await conversationService.clearAIGenerationStatus(userId, conversationId);
 
       return res.status(200).json({
-        status: 'cleared',
+        success: true,
         message: 'AI generation status cleared'
       });
     } catch (error) {
-      if (error.message === 'UNAUTHORIZED') {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-      if (error.message === 'MISSING_CONVERSATION_ID') {
-        return res.status(400).json({ message: 'Missing conversationId' });
-      }
-      if (error.message === 'CONVERSATION_NOT_FOUND') {
-        return res.status(404).json({ message: 'Conversation not found' });
-      }
-      // 🔒 修正跨帳號寫入漏洞：conversationId 存在但不屬於呼叫者
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ message: 'Access denied' });
+      const mapped = ERROR_MAP[error.message];
+      if (mapped) {
+        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
       }
       console.error('❌ [conversationController]', error);
-      return res.status(500).json({ message: 'Internal server error' });
+      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
     }
   },
 };

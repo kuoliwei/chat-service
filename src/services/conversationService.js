@@ -1,10 +1,10 @@
-import { conversationRepository, messageRepository } from '../repositories/conversationRepository.js';
+import { conversationRepository, messageRepository, conversationCreationJobRepository } from '../repositories/conversationRepository.js';
 import { serviceClient } from '../lib/serviceClient.js';
 import { config } from '../config/index.js';
+import { prisma } from '../lib/prisma.js';
 
-// 🆕 內存 Map：跟蹤 AI 生成狀態（成功、失敗）
-// Key: conversationId, Value: { status: 'generating'|'completed'|'failed', error?: string }
-const aiGenerationStatus = new Map();
+// AI 生成狀態持久化在 Conversation 表的 generationStatus 等欄位
+// （原本是進程內記憶體 Map，服務重啟即遺失、多實例不共享，已改為 DB 欄位）。
 
 function generateConversationId() {
   return `conv_${Date.now()}`;
@@ -25,8 +25,10 @@ function validateUserId(userId) {
 // getAIGenerationStatus、clearAIGenerationStatus 曾經完全不驗證 userId，
 // 任何登入者都能讀到或清除別人對話的內容）。
 // 集中成一個函式後，之後任何新方法都只有一種寫法可用。
-async function assertConversationOwnership(userId, conversationId) {
-  validateUserId(userId);
+async function assertConversationOwnership(userId, conversationId, { isInternalRequest } = {}) {
+  if (!isInternalRequest) {
+    validateUserId(userId);
+  }
 
   if (!conversationId) {
     throw new Error('MISSING_CONVERSATION_ID');
@@ -38,7 +40,7 @@ async function assertConversationOwnership(userId, conversationId) {
     throw new Error('CONVERSATION_NOT_FOUND');
   }
 
-  if (conversation.userId !== userId) {
+  if (!isInternalRequest && conversation.userId !== userId) {
     throw new Error('FORBIDDEN');
   }
 
@@ -231,12 +233,11 @@ ${textToSummarize}`;
 }
 
 /**
- * 聊天室建立流程的記憶體狀態追蹤
- * key: `${userId}:${characterId}`
- * value: { status: 'preparing' | 'failed', error?: string }
- * 注意：聊天室一旦成功寫入 DB，就從這裡移除（DB 有記錄 = 已就緒）
+ * 聊天室建立流程的狀態追蹤（原本是進程內記憶體 Map，改為 conversationCreationJobRepository 持久化）
+ * status: 'preparing' | 'failed'
+ * 注意：聊天室一旦成功寫入 DB，job 記錄就被刪除（DB 有 Conversation 記錄 = 已就緒，
+ * 不再需要標記 'ready' 這個中繼狀態——getOrCreateConversation 的步驟 1 會查到它）
  */
-const creationJobs = new Map();
 
 /**
  * 背景發起聊天室建立流程（非同步）
@@ -244,16 +245,15 @@ const creationJobs = new Map();
  * @param {string} userId - 用戶 ID
  * @param {string} characterId - 角色 ID
  * @param {Object} character - 角色信息對象
- * @param {string} jobKey - creationJobs 的 key
  * @param {string} conversationId - 生成的聊天室 ID
  * @returns {Promise<void>}
  */
-async function _prepareAndCreateConversation(userId, characterId, character, jobKey, conversationId) {
+async function _prepareAndCreateConversation(userId, characterId, character, conversationId) {
   console.log(`\n🏗️  [背景任務] 發起聊天室建立`);
   console.log(`  ├─ conversationId: ${conversationId}`);
   console.log(`  ├─ userId: ${userId}`);
   console.log(`  ├─ character: ${character.name}`);
-  console.log(`  └─ jobKey: ${jobKey}`);
+  console.log(`  └─ userId+characterId: ${userId}:${characterId}`);
 
   try {
     // === 1. 發起 RAG 初始化 ===
@@ -338,15 +338,19 @@ async function _prepareAndCreateConversation(userId, characterId, character, job
       console.log(`  ├─ 💬 【背景任務】開場白已保存`);
     }
 
-    // === 5. 標記 job 狀態為 ready ===
-    creationJobs.set(jobKey, { status: 'ready', conversationId });
-    console.log(`  └─ ✅ 【背景任務】標記狀態: ready\n`);
+    // === 5. 成功：刪除 job 記錄（DB 已有 Conversation 記錄 = 已就緒） ===
+    await conversationCreationJobRepository.delete(userId, characterId);
+    console.log(`  └─ ✅ 【背景任務】job 記錄已清除（DB 記錄即代表就緒）\n`);
 
   } catch (error) {
     console.error(`\n  ❌ 【背景任務】失敗: ${error.message}`);
 
     // 失敗 → 標記 job 為 failed
-    creationJobs.set(jobKey, { status: 'failed', error: error.message });
+    await conversationCreationJobRepository.upsert(userId, characterId, {
+      status: 'failed',
+      conversationId,
+      error: error.message,
+    });
     console.error(`  └─ job 已標記為 failed\n`);
   }
 }
@@ -414,10 +418,9 @@ export const conversationService = {
     console.log(`  ├─ 【請求 #${requestId}】對話不存在，進入步驟 2`);
 
     // === 步驟 2：不存在 → 檢查背景建立 job ===
-    const jobKey = `${userId}:${characterId}`;
-    const job = creationJobs.get(jobKey);
+    const job = await conversationCreationJobRepository.findByKey(userId, characterId);
 
-    console.log(`  ├─ 【請求 #${requestId}】[步驟 2] 檢查 job 狀態: jobKey=${jobKey}`);
+    console.log(`  ├─ 【請求 #${requestId}】[步驟 2] 檢查 job 狀態: userId=${userId}, characterId=${characterId}`);
     if (job) {
       console.log(`  ├─ 【請求 #${requestId}】⚠️  job 已存在: status=${job.status}, conversationId=${job.conversationId}`);
 
@@ -426,7 +429,7 @@ export const conversationService = {
         // 用戶可以手動點擊重試，下次請求就能重新檢查
         console.log(`  ├─ 【請求 #${requestId}】❌ job 已失敗，清除舊 job`);
         console.log(`  ├─ 失敗原因: ${job.error || 'unknown'}`);
-        creationJobs.delete(jobKey);
+        await conversationCreationJobRepository.delete(userId, characterId);
         console.log(`  └─ 【請求 #${requestId}】回傳 503（用戶可重試）\n`);
         return {
           status: 'failed',
@@ -436,9 +439,9 @@ export const conversationService = {
 
       if (job.status === 'preparing') {
         // 🆕 【單一寫入者設計】輪詢不再查 RAG、也不寫 DB——這些全由背景任務
-        //    _prepareAndCreateConversation 包辦（等 RAG → 寫 DB → 標記 job）。
+        //    _prepareAndCreateConversation 包辦（等 RAG → 寫 DB → 刪除 job）。
         //    輪詢只需回報「還在準備中」，讓前端繼續輪詢：
-        //      - 背景任務完成 → 寫好 DB + job='ready' → 下一輪由【步驟 1 查現有對話】查到 → 回 ready
+        //      - 背景任務完成 → 寫好 DB + 刪除 job → 下一輪由【步驟 1 查現有對話】查到 → 回 ready
         //      - 背景任務失敗 → job='failed' → 由上面的 failed 分支回 failed
         //    （移除舊的「輪詢也寫 DB」邏輯，避免與背景任務雙重寫入撞 unique constraint）
         console.log(`  ├─ 【請求 #${requestId}】🔄 job 準備中，背景任務處理中，回傳 preparing`);
@@ -456,19 +459,19 @@ export const conversationService = {
     //   // 這樣可以使用具體的錯誤信息，而不是固定的通用消息
     //   console.log(`  ├─ 【請求 #${requestId}】❌ AI Service 無法連接: ${error.message}`);
     //   const errorMsg = error.message;
-    //   creationJobs.set(jobKey, { status: 'failed', error: errorMsg });
+    //   await conversationCreationJobRepository.upsert(userId, characterId, { status: 'failed', error: errorMsg });
     //   throw new Error(`AI_SERVICE_UNAVAILABLE: ${errorMsg}`);
     // }
 
     // === 步驟 4：AI Service 可用 → 啟動背景建立，立即回傳 preparing ===
     const conversationId = generateConversationId();
-    creationJobs.set(jobKey, { status: 'preparing', conversationId });
+    await conversationCreationJobRepository.upsert(userId, characterId, { status: 'preparing', conversationId });
     console.log(`  ├─ 【請求 #${requestId}】[步驟 4] ✅ 創建新 job，允許該請求繼續`);
     console.log(`  ├─ conversationId: ${conversationId}`);
     console.log(`  ├─ character: ${character.name}`);
     console.log(`  └─ 發起 RAG 初始化...\n`);
     // fire-and-forget（不 await）
-    _prepareAndCreateConversation(userId, characterId, character, jobKey, conversationId);
+    _prepareAndCreateConversation(userId, characterId, character, conversationId);
 
     return { status: 'preparing' };
   },
@@ -550,10 +553,10 @@ export const conversationService = {
   },
 
   // 🆕 tempUserId（可選）：前端臨時訊息 ID，生成成功後放入狀態供前端配對替換
-  async sendMessageToConversation(userId, conversationId, text, tempUserId) {
+  async sendMessageToConversation(userId, conversationId, text, tempUserId, { isInternalRequest } = {}) {
     // 先授權再驗輸入：無權存取這個聊天室的人，不該因為送出的內容格式不同
     // 而收到不一樣的回應（400 vs 403 的差異本身就是一種資訊）。
-    const conversation = await assertConversationOwnership(userId, conversationId);
+    const conversation = await assertConversationOwnership(userId, conversationId, { isInternalRequest });
 
     if (!text) {
       throw new Error('MISSING_TEXT');
@@ -569,37 +572,44 @@ export const conversationService = {
     //   // 🆕 【統一錯誤處理】捕獲具體的錯誤信息，而不是使用固定的通用消息
     //   console.error(`❌ [conversationService] AI Service 無法連接: ${error.message}`);
     //
-    //   // 記錄失敗狀態到內存 Map，讓前端可以立即查詢（使用具體的錯誤信息）
-    //   aiGenerationStatus.set(conversation.id, {
-    //     status: 'failed',
-    //     error: error.message,  // ← 使用具體的錯誤信息
-    //     timestamp: Date.now()
+    //   // 記錄失敗狀態到 DB，讓前端可以立即查詢（使用具體的錯誤信息）
+    //   await conversationRepository.update(conversation.id, {
+    //     generationStatus: 'failed',
+    //     generationError: error.message,  // ← 使用具體的錯誤信息
+    //     generationUpdatedAt: new Date(),
     //   });
     //   throw new Error(`AI_SERVICE_UNAVAILABLE: ${error.message}`);
     // }
 
     // 🆕 【第二步：拒絕並行生成】同一聊天室已有任務進行中 → 拒絕
-    // 【原子性】檢查後立刻上鎖，中間不能有任何 await——
-    // Node 單線程下同一個同步區塊不會被其他請求插隊，堵住競態窗口
-    const existingStatus = aiGenerationStatus.get(conversation.id);
-    if (existingStatus && existingStatus.status === 'generating') {
-      // 🆕 【第三步：殭屍鎖保險】generating 超過時限視為失效，放行新請求
-      // 時限 = generateResponse timeout + 30 秒緩衝（異步任務最久等 timeout 就會進 catch）
-      const staleLimitMs = (config.ai?.timeouts?.generateResponse || 60000) + 30000;
-      const lockAgeMs = Date.now() - (existingStatus.timestamp || 0);
+    // 【原子性】原本靠 in-memory Map 的單執行緒同步區塊（檢查後立刻上鎖、中間不能有 await）
+    // 提供原子性；改為 DB 持久化後，用 updateMany 的 where 條件做「檢查後更新」，
+    // 讓資料庫層面保證同一時間只有一個請求能搶到鎖：
+    // where 條件涵蓋「目前不是 generating」或「是 generating 但已超過殭屍鎖時限」，
+    // count === 0 代表這兩個條件都不成立（別人正持有有效的鎖），視為搶鎖失敗。
+    const staleLimitMs = (config.ai?.timeouts?.generateResponse || 60000) + 30000;
+    const staleBeforeTimestamp = new Date(Date.now() - staleLimitMs);
 
-      if (lockAgeMs < staleLimitMs) {
-        console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中（已 ${Math.round(lockAgeMs / 1000)} 秒），拒絕新訊息`);
-        throw new Error('AI_GENERATION_IN_PROGRESS');
-      }
-
-      // 鎖已過期：不應該發生的異常狀態，記警告後放行（下面會覆寫新鎖）
-      console.warn(`⚠️  [conversationService] 偵測到殭屍鎖: 聊天室 ${conversation.id} 的 generating 狀態已掛 ${Math.round(lockAgeMs / 1000)} 秒（時限 ${staleLimitMs / 1000} 秒），視為失效並放行`);
-    }
-    aiGenerationStatus.set(conversation.id, {
-      status: 'generating',
-      timestamp: Date.now()
+    const lockResult = await prisma.conversation.updateMany({
+      where: {
+        id: conversation.id,
+        OR: [
+          { generationStatus: { not: 'generating' } },
+          { generationStatus: null },
+          { generationUpdatedAt: { lt: staleBeforeTimestamp } },
+        ],
+      },
+      data: {
+        generationStatus: 'generating',
+        generationError: null,
+        generationUpdatedAt: new Date(),
+      },
     });
+
+    if (lockResult.count === 0) {
+      console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中，拒絕新訊息`);
+      throw new Error('AI_GENERATION_IN_PROGRESS');
+    }
     console.log(`🔒 [conversationService] 已上鎖（generating），開始處理訊息`);
 
     // 🆕 【重大改動】不立即保存用戶訊息
@@ -631,7 +641,7 @@ export const conversationService = {
     } catch (error) {
       // 解鎖後再拋出，讓 controller 回傳錯誤
       console.log(`🔓 [conversationService] 前置流程失敗，解鎖並拋出: ${error.message}`);
-      aiGenerationStatus.delete(conversation.id);
+      await conversationRepository.update(conversation.id, { generationStatus: null });
       throw error;
     }
 
@@ -696,30 +706,30 @@ export const conversationService = {
       console.log(`💬 [conversationService] AI 訊息已創建: id=${assistantMessage.id}`);
       console.log(`  【DEBUG】AI 訊息詳情: ID: ${assistantMessage.id.substring(0, 8)}..., status: ${assistantMessage.status}, createdAt: ${assistantMessage.createdAt}`);
 
-      // 記錄成功狀態到內存 Map，讓前端可以檢測到生成完成
+      // 記錄成功狀態到 DB，讓前端可以檢測到生成完成
       // 🆕 附上「臨時 ID ↔ 真實 ID」配對資訊，前端據此精準替換
-      const completedStatus = {
-        status: 'completed',
-        tempUserId: tempUserId || null,          // 前端送來的臨時用戶訊息 ID
-        userMessageId: userMessage.id,           // 剛存入 DB 的用戶訊息真實 ID
-        assistantMessageId: assistantMessage.id, // 剛存入 DB 的 AI 訊息真實 ID
-        timestamp: Date.now()
-      };
-      aiGenerationStatus.set(conversation.id, completedStatus);
+      await conversationRepository.update(conversation.id, {
+        generationStatus: 'completed',
+        generationError: null,
+        generationTempUserId: tempUserId || null,
+        generationUserMessageId: userMessage.id,
+        generationAssistantMessageId: assistantMessage.id,
+        generationUpdatedAt: new Date(),
+      });
       console.log(`✅ [conversationService] AI 生成狀態已更新為 'completed'`);
-      console.log(`🐛 [DEBUG] ===== 配對資訊已寫入狀態 Map =====`);
-      console.log(`🐛 [DEBUG]   tempUserId（前端臨時）: ${completedStatus.tempUserId}`);
-      console.log(`🐛 [DEBUG]   userMessageId（DB 真實）: ${completedStatus.userMessageId}`);
-      console.log(`🐛 [DEBUG]   assistantMessageId（DB 真實）: ${completedStatus.assistantMessageId}`);
+      console.log(`🐛 [DEBUG] ===== 配對資訊已寫入 DB =====`);
+      console.log(`🐛 [DEBUG]   tempUserId（前端臨時）: ${tempUserId || null}`);
+      console.log(`🐛 [DEBUG]   userMessageId（DB 真實）: ${userMessage.id}`);
+      console.log(`🐛 [DEBUG]   assistantMessageId（DB 真實）: ${assistantMessage.id}`);
     } catch (error) {
       console.error(`❌ [conversationService] 背景生成失敗:`, error.message);
       console.log(`⚠️  [conversationService] 用戶訊息與 AI 訊息都不保存（失敗時不持久化）`);
 
-      // 記錄失敗狀態到內存 Map，讓前端可以查詢
-      aiGenerationStatus.set(conversation.id, {
-        status: 'failed',
-        error: error.message,
-        timestamp: Date.now()
+      // 記錄失敗狀態到 DB，讓前端可以查詢
+      await conversationRepository.update(conversation.id, {
+        generationStatus: 'failed',
+        generationError: error.message,
+        generationUpdatedAt: new Date(),
       });
       console.log(`⚠️  [conversationService] AI 回應失敗已記錄，前端將透過狀態查詢偵測`);
     }
@@ -747,10 +757,11 @@ export const conversationService = {
     return messages.slice(offset, offset + limit);
   },
 
-  async getMessagesByConversationId(userId, conversationId, limit = 50, offset = 0) {
+  async getMessagesByConversationId(userId, conversationId, limit = 50, offset = 0, { isInternalRequest } = {}) {
     // 🔒 擁有權檢查：修正前這裡只確認 conversationId 存在，沒驗證是否屬於呼叫者，
     // 任何登入者帶任意 conversationId 都能讀到別人的完整對話內容。
-    const conversation = await assertConversationOwnership(userId, conversationId);
+    // 內部呼叫（isInternalRequest）跳過擁有權比對，供 ai-service 查詢對話歷史。
+    const conversation = await assertConversationOwnership(userId, conversationId, { isInternalRequest });
 
     // 查詢訊息
     const messages = await messageRepository.findMany(
@@ -778,11 +789,9 @@ export const conversationService = {
     await cleanupConversationRAG(conversationId);
 
     // RAG 清理成功，才刪除對話（訊息會自動刪除，因為有 onDelete: Cascade）
+    // AI 生成狀態存在 Conversation 表本身的欄位，整筆記錄刪除後自然一併清除，不需額外處理。
     console.log(`🗑️ [conversationService] 刪除對話: conversationId=${conversationId}`);
     await conversationRepository.delete(conversationId);
-
-    // 🆕 清除內存中的 AI 生成狀態記錄
-    aiGenerationStatus.delete(conversationId);
 
     return { message: 'Conversation deleted successfully' };
   },
@@ -814,13 +823,9 @@ export const conversationService = {
     }
 
     // RAG 全部清理成功，才刪除所有對話
+    // AI 生成狀態存在 Conversation 表本身的欄位，整筆記錄刪除後自然一併清除，不需額外處理。
     console.log(`🗑️ [conversationService] 刪除角色對話: userId=${userId}, characterId=${characterId}, count=${conversations.length}`);
     await conversationRepository.deleteByCharacterId(characterId, userId);
-
-    // 🆕 清除每個對話在內存中的 AI 生成狀態記錄
-    for (const conversation of conversations) {
-      aiGenerationStatus.delete(conversation.id);
-    }
 
     return {
       message: `${conversations.length} conversation(s) deleted successfully`,
@@ -870,8 +875,7 @@ export const conversationService = {
   // 🆕 【刪除訊息】刪除指定的用戶訊息及其後所有訊息（回溯式刪除）
   // 語義：對話裁剪回該訊息發出之前的狀態，之後的用戶訊息與 AI 回覆全部刪除
   async deleteMessageAndSubsequent(userId, conversationId, messageId) {
-    // 缺 userId 一律先回 UNAUTHORIZED，維持與其他方法一致的錯誤優先序
-    // （authMiddleware 已保證它存在，這裡是防禦性的第二道）。
+    // 缺 userId 一律先回 UNAUTHORIZED，維持與其他方法一致的錯誤優先序。
     validateUserId(userId);
 
     // MISSING_PARAMS 涵蓋兩者缺一，順序要在擁有權檢查之前——
@@ -882,11 +886,10 @@ export const conversationService = {
     }
 
     // 驗證對話存在與所有權
-    await assertConversationOwnership(userId, conversationId);
+    const ownedConversation = await assertConversationOwnership(userId, conversationId);
 
     // 🆕 【生成中拒絕】AI 正在生成時不允許刪除（生成完成會存入新訊息，會打架）
-    const genStatus = aiGenerationStatus.get(conversationId);
-    if (genStatus && genStatus.status === 'generating') {
+    if (ownedConversation.generationStatus === 'generating') {
       console.log(`🚫 [conversationService] 聊天室 ${conversationId} AI 生成中，拒絕刪除訊息`);
       throw new Error('AI_GENERATION_IN_PROGRESS');
     }
@@ -978,7 +981,13 @@ export const conversationService = {
     console.log(`🗑️ [conversationService] ===== 回溯刪除完成 =====\n`);
 
     // 清除該聊天室的舊生成狀態（completed/failed 已無意義）
-    aiGenerationStatus.delete(conversationId);
+    await conversationRepository.update(conversationId, {
+      generationStatus: null,
+      generationError: null,
+      generationTempUserId: null,
+      generationUserMessageId: null,
+      generationAssistantMessageId: null,
+    });
 
     return {
       deletedCount: result.count,
@@ -1023,11 +1032,10 @@ export const conversationService = {
       throw new Error('MISSING_CHARACTER_ID');
     }
 
-    const jobKey = `${userId}:${characterId}`;
-    const job = creationJobs.get(jobKey);
+    const job = await conversationCreationJobRepository.findByKey(userId, characterId);
 
     if (!job) {
-      console.log(`  ⚠️  [conversationService] job 不存在，無需清除: ${jobKey}`);
+      console.log(`  ⚠️  [conversationService] job 不存在，無需清除: ${userId}:${characterId}`);
       throw new Error('NO_FAILED_JOB');
     }
 
@@ -1037,11 +1045,11 @@ export const conversationService = {
     }
 
     // 清除失敗 job，允許重新開始
-    console.log(`  🔄 [conversationService] 清除失敗 job，允許重試: ${jobKey}`);
-    creationJobs.delete(jobKey);
+    console.log(`  🔄 [conversationService] 清除失敗 job，允許重試: ${userId}:${characterId}`);
+    await conversationCreationJobRepository.delete(userId, characterId);
 
     return {
-      status: 'cleared',
+      success: true,
       message: '失敗狀態已清除，請重新開啟聊天室'
     };
   },
@@ -1050,11 +1058,9 @@ export const conversationService = {
   // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能查詢別人聊天室的
   // AI 生成狀態（改成 async 是因為擁有權檢查需要查一次資料庫）。
   async getAIGenerationStatus(userId, conversationId) {
-    await assertConversationOwnership(userId, conversationId);
+    const conversation = await assertConversationOwnership(userId, conversationId);
 
-    const status = aiGenerationStatus.get(conversationId);
-
-    if (!status) {
+    if (!conversation.generationStatus) {
       // 沒有記錄 = 還沒開始或已完成
       return {
         status: 'unknown',
@@ -1062,19 +1068,32 @@ export const conversationService = {
       };
     }
 
-    console.log(`📊 [conversationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${status.status}`);
+    console.log(`📊 [conversationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${conversation.generationStatus}`);
 
-    return status;
+    return {
+      status: conversation.generationStatus,
+      error: conversation.generationError || undefined,
+      tempUserId: conversation.generationTempUserId || undefined,
+      userMessageId: conversation.generationUserMessageId || undefined,
+      assistantMessageId: conversation.generationAssistantMessageId || undefined,
+      timestamp: conversation.generationUpdatedAt ? conversation.generationUpdatedAt.getTime() : undefined,
+    };
   },
 
   // 🆕 清除 AI 生成狀態（用戶重試或其他操作後）
   // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能清除別人聊天室的
   // AI 生成狀態記錄（改成 async 是因為擁有權檢查需要查一次資料庫）。
   async clearAIGenerationStatus(userId, conversationId) {
-    await assertConversationOwnership(userId, conversationId);
+    const conversation = await assertConversationOwnership(userId, conversationId);
 
-    if (aiGenerationStatus.has(conversationId)) {
-      aiGenerationStatus.delete(conversationId);
+    if (conversation.generationStatus) {
+      await conversationRepository.update(conversationId, {
+        generationStatus: null,
+        generationError: null,
+        generationTempUserId: null,
+        generationUserMessageId: null,
+        generationAssistantMessageId: null,
+      });
       console.log(`🗑️ [conversationService] 已清除 AI 生成狀態: conversationId=${conversationId}`);
     }
   },

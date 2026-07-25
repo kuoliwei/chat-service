@@ -95,3 +95,27 @@ export const messageRepository = {
     });
   },
 };
+
+// 聊天室建立流程的狀態追蹤（原本是進程內記憶體 Map `creationJobs`，改為持久化）。
+export const conversationCreationJobRepository = {
+  async findByKey(userId, characterId) {
+    return await prisma.conversationCreationJob.findUnique({
+      where: { userId_characterId: { userId, characterId } },
+    });
+  },
+
+  async upsert(userId, characterId, data) {
+    return await prisma.conversationCreationJob.upsert({
+      where: { userId_characterId: { userId, characterId } },
+      create: { userId, characterId, ...data },
+      update: data,
+    });
+  },
+
+  async delete(userId, characterId) {
+    // 目標紀錄可能已不存在（例如重複清除），用 deleteMany 避免 P2025 例外
+    return await prisma.conversationCreationJob.deleteMany({
+      where: { userId, characterId },
+    });
+  },
+};

@@ -29,11 +29,38 @@ model Conversation {
   protagonistName       String?
   protagonistBackground String?
 
+  // AI 生成狀態追蹤（原本存在進程內記憶體 Map，改為持久化欄位）：
+  // generationStatus 為 null 表示目前沒有生成任務在進行（初始狀態，或狀態已被清除）。
+  // 'generating' 同時扮演並行鎖角色——sendMessageToConversation 寫入前用
+  // updateMany({ where: { id, generationStatus: { not: 'generating' } } }) 做原子性的
+  // 「檢查後更新」，取代原本 in-memory Map 天然單執行緒同步區塊提供的原子性。
+  generationStatus            String?   // 'generating' | 'completed' | 'failed'
+  generationError             String?
+  generationTempUserId        String?
+  generationUserMessageId     String?
+  generationAssistantMessageId String?
+  generationUpdatedAt         DateTime?
+
   // 一對多關聯：一個對話有多條訊息
   messages    Message[]
 
   @@index([userId])
   @@index([characterId])
+}
+
+// 聊天室建立流程的狀態追蹤（原本存在進程內記憶體 Map，改為持久化）。
+// 對話建立完成前 Conversation 記錄還不存在，所以需要獨立的表，
+// key 是 userId + characterId（同一使用者對同一角色同時只會有一個建立中的 job）。
+model ConversationCreationJob {
+  userId         String
+  characterId    String
+  status         String    // 'preparing' | 'failed'
+  conversationId String?   // 已產生、準備寫入的對話 ID（preparing 階段就先決定，失敗時保留供除錯）
+  error          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@id([userId, characterId])
 }
 
 model Message {

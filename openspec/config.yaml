@@ -1,0 +1,132 @@
+schema: spec-driven
+
+# Project context
+# 顯示給 AI 在建立/修改 openspec 文件時參考。本檔描述的是 chat-service「當前實際」的架構，
+# 不是理想版——刻意記錄遺留代碼與隱藏耦合，因為它們正是後續「規格驅動優化」的對象。
+context: |
+  ## chat-service（Persona Nexus 平台的聊天訊息服務）
+
+  類 Character.ai 的 AI 角色扮演平台其中一個微服務。負責存儲用戶與 AI 角色的對話記錄，
+  並協調 RAG 記憶（角色背景/few-shot/歷史摘要）與非同步 AI 回覆生成的完整生命週期。
+  是目前為止已優化的四個 Node 服務中**職責最多、狀態最複雜**的一個：
+  雙資料模型（Conversation + Message）、內存狀態機（建立 job、AI 生成鎖）、
+  服務間非同步輪詢（RAG 初始化）、摘要與回溯刪除的連動邏輯。
+
+  ### 技術棧
+  Node.js（ESM）／ Express 5 ／ Prisma 5（`@prisma/adapter-libsql`）／ SQLite ／ axios（服務間呼叫）。
+  ⚠️ `package.json` 的 `"test": "jest"` 是斷的——jest 未安裝，且沒有任何 `*.test.js`，目前零自動化測試。
+
+  ### 當前架構（三層 + 內存狀態）
+  ```
+  瀏覽器 → api-gateway(8000) → chat-service(6000)
+                                    │
+        app.js（路由 + CORS + authMiddleware）
+                                    ↓
+        controllers/conversationController.js（HTTP 進出、大量 console.log/🐛DEBUG）
+                                    ↓
+        services/conversationService.js（業務邏輯 + 2 個內存 Map：
+          creationJobs 追蹤聊天室建立中/失敗狀態、
+          aiGenerationStatus 追蹤 AI 生成中/完成/失敗狀態）
+                                    ↓
+        repositories/conversationRepository.js（純 Prisma CRUD，conversationRepository + messageRepository）
+                                    ↓
+        lib/prisma.js（PrismaClient，未用 adapter；注意 prisma.config.ts 另定義了 libsql adapter 版但無人 import）
+                                    ↓
+                              SQLite（prisma/dev.db）
+
+        lib/serviceClient.js（呼叫 ai-service / character-service，一律經 gateway `/internal/*`）
+  ```
+
+  ### 對外 API（經 gateway，內部路徑前綴 `/api/v1/conversations`）
+  詳見 `CLAUDE.md` API 端點表——涵蓋對話 CRUD、訊息發送（同步/非同步兩種）、
+  回溯式刪除訊息、主角人設、AI 生成狀態輪詢。
+
+  ### 核心資料流程
+  1. **建立聊天室**：`getOrCreateConversation` 非同步 + 輪詢模式——先查現有對話，
+     不存在則建立內存 job（`creationJobs`）並 fire-and-forget 背景任務，
+     背景任務發起 ai-service RAG 初始化、輪詢其狀態（最多 120 秒）、成功才寫 DB。
+     前端輪詢同一端點直到 `ready`/`failed`。
+  2. **發送訊息（非同步版）**：`sendMessageToConversation` 立即回 202-like `accepted`，
+     不即刻存用戶訊息；背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，
+     成功才「原子性」同時存用戶訊息 + AI 回覆；`aiGenerationStatus` Map 記錄狀態供前端輪詢。
+     並行防護：同聊天室已有生成中任務時拒絕新訊息（含逾時視為殭屍鎖的保險機制）。
+  3. **摘要機制**：未摘要訊息字數達閾值時，先摘要較舊訊息（呼叫 ai-service 生成 + 存入 Qdrant），
+     標記 `summarized`/`summaryId`，短期記憶只留最新 N 條原文。
+  4. **回溯刪除訊息**：刪除某則用戶訊息連帶刪除其後所有訊息；若刪除範圍涉及已摘要訊息，
+     連動刪除對應 Qdrant 摘要，並把刪除點前、被同一摘要涵蓋的訊息標回未摘要。
+  5. **刪除對話 / 主角人設更新**：一律先呼叫外部服務（清 RAG / 更新 RAG），失敗即拋錯中止、
+     DB 不動；成功才寫 DB——維持 DB 與 RAG 資料一致，避免孤兒資料。
+
+  ### 已知遺留代碼（`simplify-chat-service` change 已於 2026-07-25 處理下列項目）
+  - ~~`src/app.js.backup`（舊版 Express app 死代碼）~~ → 已刪除。
+  - ~~`authMiddleware.js` 寫入的 `req.userId`（無人讀取的死欄位）~~ → 已移除該行寫入。
+  - ~~`prisma.config.ts`（已查證 Prisma 5.22 CLI 不讀取，確認為死代碼）~~ → 已刪除。
+  - ~~`cors()` 允許所有 origin（已 grep 前端確認無啟用中直連路徑）~~ → 已移除。
+  - ~~`package.json` 的 `"test": "jest"`（jest 未安裝、無測試檔案，執行必定失敗）~~ → 已移除該 script。
+
+  **本輪未處理（使用者確認暫緩或不處理）：**
+  - Controller 與 service 全層仍有大量除錯用 `console.log`（含明顯的 `🐛 [DEBUG]` 前綴）——
+    本輪不處理，暫緩。
+  - `creationJobs`、`aiGenerationStatus` 是進程內記憶體 Map，服務重啟即遺失狀態——12-Factor
+    Processes（無狀態）的已知限制，本輪不處理，牽涉是否改用持久化儲存的架構決策，留待日後獨立評估。
+  - `src/config/config.txt`：`config.json` 的純文字說明文件，內容包含已知未使用的
+    `rag.topK`/`rag.threshold` 欄位（文件本身已註明「未使用」），非本輪範圍。
+  - `conversationService.js` 直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——
+    JS 環境下屬約定俗成，與前三服務判定一致，確認不處理。
+
+  ### 錯誤碼慣例（`simplify-chat-service` 已統一）
+  Service 拋語意錯誤字串（如 `UNAUTHORIZED`、`CONVERSATION_NOT_FOUND`、`FORBIDDEN`、
+  `AI_GENERATION_IN_PROGRESS`、`SERVICE_ERROR: <detail>`、`AI_SERVICE_UNAVAILABLE: <detail>`）。
+  Controller 以模組層級共用 `ERROR_MAP` 查表把「固定 status + 固定 message」的錯誤碼轉 HTTP
+  status（與 auth/user/character 三服務風格一致）；帶動態內容或依端點語意不同的錯誤碼
+  （`AI_GENERATION_IN_PROGRESS`、`AI_SERVICE_UNAVAILABLE:`/`SERVICE_ERROR:` 前綴、
+  `sendMessageToConversation` 的 `MISSING_CONVERSATION_ID`/`MISSING_TEXT`）維持個別處理。
+  `sendMessage`（依 characterId）的 `CONVERSATION_NOT_FOUND` 已統一為 404，與
+  `sendMessageToConversation` 一致（本次優化唯一的可觀察行為變更）。
+
+  ### 授權模型
+  - Controller 直接信任 gateway 注入的 `x-user-id` header（未驗證，本服務無 JWT 依賴，刻意的架構分工）。
+  - 以 `conversationId` 為主鍵的方法，擁有權檢查已集中成 `assertConversationOwnership`
+    （`conversationService.js`）——這是本服務先前已修正過的漏洞（曾有 4 處方法完全不驗證
+    userId，任何登入者可讀取/清除他人對話資料），修正已隨 commit `01baf9e` 完成、非本輪待辦。
+
+  ### 環境變數
+  - `PORT`（預設 6000，有走 env）
+  - `DATABASE_URL`（`file:./dev.db`，有走 env）
+  - `GATEWAY_URL`（預設 `http://localhost:8000`，有走 env）
+  - 皆無寫死問題。
+
+  ### 架構原則（平台層級）
+  - 前端一律打 gateway，不直接調用後端。
+  - JWT 驗證集中在 gateway；後端服務信任 gateway 注入的 header，本身不驗 JWT。
+  - 服務間呼叫（本服務 → ai-service / character-service）一律經 gateway 的 `/internal/*` 路由，
+    不直連對方服務。
+
+  ### 協作約定
+  - 學習導向，優先解釋原理與設計思考，不直接貼完整最終程式碼；使用者貼程式碼後仔細 review
+    並指出具體行號問題。
+  - `.env` 與 `.env.example` 應同步。
+  - 本服務是獨立 git repo（非 monorepo），已設定 origin 遠端，`main` branch 與 origin 同步。
+  - 先前文件（`CLAUDE.md`）記載「沒有 git」與多項待實裝功能（訊息刪除、對話刪除等），
+    經比對 git log 與程式碼後確認**已過時**——這些功能實際上都已實裝，`CLAUDE.md` 已於本輪更正。
+
+# Per-artifact rules
+rules:
+  proposal:
+    - 中文撰寫，200-500 字為宜
+    - 包含「為什麼做」(Why)、「變更清單」(What Changes)、「影響範圍」(Impact)
+    - 若動到 API/錯誤碼/環境變數，清楚列舉新增或移除項
+    - 修改既有行為要說明向後相容性
+  specs:
+    - 使用 Given/When/Then scenario 格式，每個 Requirement 至少一個 Scenario
+    - RFC 2119 關鍵字（MUST/SHALL/SHOULD/MAY）標示需求強度
+    - API 變更要有完整 Request/Response JSON 例子
+    - 錯誤處理列舉所有 error code 與對應 HTTP status
+    - Delta Spec 格式分 ADDED / MODIFIED / REMOVED 三節
+  design:
+    - 架構決策與權衡說明；服務間通信畫文本流程或時序
+    - 明確標示「當前」與「優化後」的差異（架構圖前後對照）
+  tasks:
+    - 每個任務控制在 2-3 小時內可完成
+    - 層級清楚（子任務縮排），標示依賴關係
+    - 檢查項包含單元測試與文件更新
