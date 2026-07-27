@@ -28,6 +28,7 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 - Express 5 + Prisma ORM + SQLite，雙資料模型：Conversation（含角色/主角快照欄位）+ Message
 - 聊天室建立採**非同步 + 輪詢**：`getOrCreateConversation` 先回 `202 preparing`，背景任務 `_prepareAndCreateConversation` 發起 RAG 初始化並輪詢其狀態，完成才寫 DB；建立中/失敗狀態持久化在 `ConversationCreationJob` 表（`userId`+`characterId` 為主鍵），非記憶體 Map，服務重啟不遺失
 - 發送訊息也是**非同步**：`sendMessageToConversation` 立即回 `201 accepted`，背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，成功才**原子性**存用戶訊息＋AI 回覆；生成中/完成/失敗狀態持久化在 `Conversation` 表的 `generationStatus`/`generationError`/`generationTempUserId`/`generationUserMessageId`/`generationAssistantMessageId`/`generationUpdatedAt` 欄位（透過 `conversationRepository` 讀寫），非記憶體 Map，供前端輪詢；服務重啟後仍可正確恢復（2026-07-26 已透過重啟服務實測驗證，見 K1-K5）
+- **2026-07-27 新增｜持久化可透過 config 切換回記憶體版本（僅供本機測試）**：`config.json` 的 `persistence.enableCreationJobs`／`persistence.enableGenerationStatus` 兩個旗標（預設皆為 `true`，行為與上述兩點一致）。設為 `false` 時，`conversationCreationJobRepository`／`generationStatusRepository`（`src/repositories/conversationRepository.js`）改用進程內記憶體 Map，等同持久化之前的舊版行為——服務重啟狀態立即消失，不需要再等殭屍鎖逾時（`generateResponse` timeout + 30 秒）。動機：手動測試時常需要中途重啟 chat-service（例如驗證其他服務的斷線恢復），持久化開啟時，中斷的 job／生成鎖會殘留在 DB 裡卡住後續操作。兩個旗標各自獨立生效，`get`/`tryAcquireLock`/`releaseLock`/`setCompleted`/`setFailed`/`reset` 等方法的行為在兩種模式下經測試腳本驗證完全一致（14/14 通過）。**不要在正式環境關閉**——關閉後服務重啟會遺失所有進行中/剛完成的狀態，前端輪詢配對會查無記錄。`config.json` 本身有進版控，關閉這兩個旗標屬本機暫時測試設定，不應 commit。
 - 摘要機制：未摘要訊息字數達閾值（`config.summary.threshold`）時，先摘要較舊訊息（呼叫 ai-service 生成摘要 + 存入 Qdrant），標記 `summarized`/`summaryId`，短期記憶只留最新 N 條（`shortTermLimit`）
 - 訊息回溯刪除（`deleteMessageAndSubsequent`）：刪除某則用戶訊息會連帶刪除其後所有訊息；若刪除範圍涉及已摘要訊息，會連動刪除對應 Qdrant 摘要，並把刪除點之前、被同一摘要涵蓋的訊息標回未摘要
 - 對話刪除 / 依角色刪除對話：**先清 RAG（失敗即中斷、DB 不動）→ 成功才刪 DB**
@@ -123,3 +124,4 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 - 有 git（`main` branch，已與 origin 同步），**與先前文件「沒有 git」的紀錄不符——已更正**
 - 沒有測試框架整合（`package.json` 已移除斷掉的 `test` script），驗證僅靠 `test.http` 手動整合測試（2026-07-25 驗證：健康檢查、缺 header、角色不存在、`sendMessage`/`sendMessageToConversation` 對話不存在時皆回 404、缺欄位、job 未找到、依角色刪除對話找不到角色等情境皆通過）
 - 沒有 lint 設定檔
+- **2026-07-27**：`src/config/config.json`、`src/config/config.txt`、`src/repositories/conversationRepository.js`、`src/services/conversationService.js` 有本機未 commit 的改動（持久化開關功能，見上方「目前狀態」）。`config.json` 目前兩個新旗標皆為 `false`（本機測試設定）——commit 前記得確認要不要改回 `true`，或排除該行不進 commit。

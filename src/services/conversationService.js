@@ -1,10 +1,10 @@
-import { conversationRepository, messageRepository, conversationCreationJobRepository } from '../repositories/conversationRepository.js';
+import { conversationRepository, messageRepository, conversationCreationJobRepository, generationStatusRepository } from '../repositories/conversationRepository.js';
 import { serviceClient } from '../lib/serviceClient.js';
 import { config } from '../config/index.js';
-import { prisma } from '../lib/prisma.js';
 
 // AI 生成狀態持久化在 Conversation 表的 generationStatus 等欄位
 // （原本是進程內記憶體 Map，服務重啟即遺失、多實例不共享，已改為 DB 欄位）。
+// config.persistence.enableGenerationStatus 可切換回記憶體版本（僅供本機測試，見 config.txt）。
 
 function generateConversationId() {
   return `conv_${Date.now()}`;
@@ -582,31 +582,14 @@ export const conversationService = {
     // }
 
     // 🆕 【第二步：拒絕並行生成】同一聊天室已有任務進行中 → 拒絕
-    // 【原子性】原本靠 in-memory Map 的單執行緒同步區塊（檢查後立刻上鎖、中間不能有 await）
-    // 提供原子性；改為 DB 持久化後，用 updateMany 的 where 條件做「檢查後更新」，
-    // 讓資料庫層面保證同一時間只有一個請求能搶到鎖：
-    // where 條件涵蓋「目前不是 generating」或「是 generating 但已超過殭屍鎖時限」，
-    // count === 0 代表這兩個條件都不成立（別人正持有有效的鎖），視為搶鎖失敗。
+    // 原子性搶鎖交給 generationStatusRepository：persistence 開啟時用 DB updateMany
+    // 的 where 條件做「檢查後更新」；關閉時用記憶體 Map + 單執行緒同步區塊，效果相同。
+    // where/檢查條件涵蓋「目前不是 generating」或「是 generating 但已超過殭屍鎖時限」，
+    // 回傳 false 代表這兩個條件都不成立（別人正持有有效的鎖），視為搶鎖失敗。
     const staleLimitMs = (config.ai?.timeouts?.generateResponse || 60000) + 30000;
-    const staleBeforeTimestamp = new Date(Date.now() - staleLimitMs);
+    const acquired = await generationStatusRepository.tryAcquireLock(conversation.id, staleLimitMs);
 
-    const lockResult = await prisma.conversation.updateMany({
-      where: {
-        id: conversation.id,
-        OR: [
-          { generationStatus: { not: 'generating' } },
-          { generationStatus: null },
-          { generationUpdatedAt: { lt: staleBeforeTimestamp } },
-        ],
-      },
-      data: {
-        generationStatus: 'generating',
-        generationError: null,
-        generationUpdatedAt: new Date(),
-      },
-    });
-
-    if (lockResult.count === 0) {
+    if (!acquired) {
       console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中，拒絕新訊息`);
       throw new Error('AI_GENERATION_IN_PROGRESS');
     }
@@ -641,7 +624,7 @@ export const conversationService = {
     } catch (error) {
       // 解鎖後再拋出，讓 controller 回傳錯誤
       console.log(`🔓 [conversationService] 前置流程失敗，解鎖並拋出: ${error.message}`);
-      await conversationRepository.update(conversation.id, { generationStatus: null });
+      await generationStatusRepository.releaseLock(conversation.id);
       throw error;
     }
 
@@ -706,31 +689,24 @@ export const conversationService = {
       console.log(`💬 [conversationService] AI 訊息已創建: id=${assistantMessage.id}`);
       console.log(`  【DEBUG】AI 訊息詳情: ID: ${assistantMessage.id.substring(0, 8)}..., status: ${assistantMessage.status}, createdAt: ${assistantMessage.createdAt}`);
 
-      // 記錄成功狀態到 DB，讓前端可以檢測到生成完成
+      // 記錄成功狀態，讓前端可以檢測到生成完成
       // 🆕 附上「臨時 ID ↔ 真實 ID」配對資訊，前端據此精準替換
-      await conversationRepository.update(conversation.id, {
-        generationStatus: 'completed',
-        generationError: null,
-        generationTempUserId: tempUserId || null,
-        generationUserMessageId: userMessage.id,
-        generationAssistantMessageId: assistantMessage.id,
-        generationUpdatedAt: new Date(),
+      await generationStatusRepository.setCompleted(conversation.id, {
+        tempUserId,
+        userMessageId: userMessage.id,
+        assistantMessageId: assistantMessage.id,
       });
       console.log(`✅ [conversationService] AI 生成狀態已更新為 'completed'`);
-      console.log(`🐛 [DEBUG] ===== 配對資訊已寫入 DB =====`);
+      console.log(`🐛 [DEBUG] ===== 配對資訊已寫入 =====`);
       console.log(`🐛 [DEBUG]   tempUserId（前端臨時）: ${tempUserId || null}`);
-      console.log(`🐛 [DEBUG]   userMessageId（DB 真實）: ${userMessage.id}`);
-      console.log(`🐛 [DEBUG]   assistantMessageId（DB 真實）: ${assistantMessage.id}`);
+      console.log(`🐛 [DEBUG]   userMessageId（真實）: ${userMessage.id}`);
+      console.log(`🐛 [DEBUG]   assistantMessageId（真實）: ${assistantMessage.id}`);
     } catch (error) {
       console.error(`❌ [conversationService] 背景生成失敗:`, error.message);
       console.log(`⚠️  [conversationService] 用戶訊息與 AI 訊息都不保存（失敗時不持久化）`);
 
-      // 記錄失敗狀態到 DB，讓前端可以查詢
-      await conversationRepository.update(conversation.id, {
-        generationStatus: 'failed',
-        generationError: error.message,
-        generationUpdatedAt: new Date(),
-      });
+      // 記錄失敗狀態，讓前端可以查詢
+      await generationStatusRepository.setFailed(conversation.id, error.message);
       console.log(`⚠️  [conversationService] AI 回應失敗已記錄，前端將透過狀態查詢偵測`);
     }
   },
@@ -889,7 +865,8 @@ export const conversationService = {
     const ownedConversation = await assertConversationOwnership(userId, conversationId);
 
     // 🆕 【生成中拒絕】AI 正在生成時不允許刪除（生成完成會存入新訊息，會打架）
-    if (ownedConversation.generationStatus === 'generating') {
+    const deleteTimeGenStatus = generationStatusRepository.get(ownedConversation);
+    if (deleteTimeGenStatus?.status === 'generating') {
       console.log(`🚫 [conversationService] 聊天室 ${conversationId} AI 生成中，拒絕刪除訊息`);
       throw new Error('AI_GENERATION_IN_PROGRESS');
     }
@@ -981,13 +958,7 @@ export const conversationService = {
     console.log(`🗑️ [conversationService] ===== 回溯刪除完成 =====\n`);
 
     // 清除該聊天室的舊生成狀態（completed/failed 已無意義）
-    await conversationRepository.update(conversationId, {
-      generationStatus: null,
-      generationError: null,
-      generationTempUserId: null,
-      generationUserMessageId: null,
-      generationAssistantMessageId: null,
-    });
+    await generationStatusRepository.reset(conversationId);
 
     return {
       deletedCount: result.count,
@@ -1059,8 +1030,9 @@ export const conversationService = {
   // AI 生成狀態（改成 async 是因為擁有權檢查需要查一次資料庫）。
   async getAIGenerationStatus(userId, conversationId) {
     const conversation = await assertConversationOwnership(userId, conversationId);
+    const genStatus = generationStatusRepository.get(conversation);
 
-    if (!conversation.generationStatus) {
+    if (!genStatus) {
       // 沒有記錄 = 還沒開始或已完成
       return {
         status: 'unknown',
@@ -1068,15 +1040,15 @@ export const conversationService = {
       };
     }
 
-    console.log(`📊 [conversationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${conversation.generationStatus}`);
+    console.log(`📊 [conversationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${genStatus.status}`);
 
     return {
-      status: conversation.generationStatus,
-      error: conversation.generationError || undefined,
-      tempUserId: conversation.generationTempUserId || undefined,
-      userMessageId: conversation.generationUserMessageId || undefined,
-      assistantMessageId: conversation.generationAssistantMessageId || undefined,
-      timestamp: conversation.generationUpdatedAt ? conversation.generationUpdatedAt.getTime() : undefined,
+      status: genStatus.status,
+      error: genStatus.error || undefined,
+      tempUserId: genStatus.tempUserId || undefined,
+      userMessageId: genStatus.userMessageId || undefined,
+      assistantMessageId: genStatus.assistantMessageId || undefined,
+      timestamp: genStatus.updatedAt ? genStatus.updatedAt.getTime() : undefined,
     };
   },
 
@@ -1085,15 +1057,10 @@ export const conversationService = {
   // AI 生成狀態記錄（改成 async 是因為擁有權檢查需要查一次資料庫）。
   async clearAIGenerationStatus(userId, conversationId) {
     const conversation = await assertConversationOwnership(userId, conversationId);
+    const genStatus = generationStatusRepository.get(conversation);
 
-    if (conversation.generationStatus) {
-      await conversationRepository.update(conversationId, {
-        generationStatus: null,
-        generationError: null,
-        generationTempUserId: null,
-        generationUserMessageId: null,
-        generationAssistantMessageId: null,
-      });
+    if (genStatus) {
+      await generationStatusRepository.reset(conversationId);
       console.log(`🗑️ [conversationService] 已清除 AI 生成狀態: conversationId=${conversationId}`);
     }
   },

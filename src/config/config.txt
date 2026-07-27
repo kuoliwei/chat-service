@@ -35,6 +35,31 @@ Chat-Service 配置說明 (config.json)
   },
 
   // ========================================
+  // 持久化設定
+  // ========================================
+  "persistence": {
+    // 建立聊天室的背景任務狀態（ConversationCreationJob 表）是否持久化。
+    // true（預設）：狀態存 DB，服務重啟後任務仍能被追蹤（正常運行應維持 true）。
+    // false：改用進程內記憶體 Map，服務一重啟狀態就消失——僅供本機測試時
+    //   避免「重啟某個依賴服務、job 卡在 preparing/failed 動彈不得」的情況，
+    //   不要在正式環境關閉。
+    // 位置: conversationRepository.js - conversationCreationJobRepository
+    "enableCreationJobs": true,
+
+    // AI 生成狀態（Conversation 表的 generationStatus 等 6 個欄位，同時兼作並行生成鎖）
+    // 是否持久化。
+    // true（預設）：狀態存 DB，chat-service 重啟後鎖與狀態仍在——代價是若進程在
+    //   生成中途被砍掉，鎖不會隨進程消失，要等殭屍鎖逾時（ai.timeouts.generateResponse
+    //   + 30 秒）才會自動解開，期間該聊天室的新訊息會被拒絕（AI_GENERATION_IN_PROGRESS）。
+    // false：改回進程內記憶體 Map（等同持久化之前的舊版行為），服務重啟鎖立即消失，
+    //   不用等殭屍鎖逾時——僅供本機測試時避免「測試中途重啟服務、鎖卡住要等 2.5 分鐘」
+    //   的情況，不要在正式環境關閉（關閉後服務重啟會遺失所有生成中/剛完成的狀態，
+    //   前端輪詢配對會查無記錄）。
+    // 位置: conversationRepository.js - generationStatusRepository
+    "enableGenerationStatus": true
+  },
+
+  // ========================================
   // 訊息摘要設定
   // ========================================
   "summary": {

@@ -1,0 +1,22 @@
+{
+  "ai": {
+    "timeouts": {
+      "generateResponse": 120000,
+      "initializeRAG": 30000,
+      "cleanupRAG": 10000
+    }
+  },
+  "rag": {
+    "topK": 3,
+    "threshold": 0.7
+  },
+  "summary": {
+    "threshold": 500,
+    "maxWords": 70,
+    "shortTermLimit": 2
+  },
+  "persistence": {
+    "enableCreationJobs": true,
+    "enableGenerationStatus": true
+  }
+}

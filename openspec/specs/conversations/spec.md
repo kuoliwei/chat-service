@@ -13,6 +13,13 @@
 > 旗標，gateway `/internal/conversations*` 轉發的內部請求（`x-internal-request: true`）跳過擁有權
 > 比對；(4) 無內容操作類回應統一為 `{ success:true, message }`（不再是 `{status:"success"/"cleared"}`）。
 > 最後對照時間：2026-07-26，與 `src/` 現況一致（含 commit `01baf9e` 的跨帳號授權修正）。
+>
+> **後續更新（2026-07-27，本機未 commit）**：上述 (2) 所述的 Prisma 持久化新增可選的關閉開關
+> （`config.json` 的 `persistence.enableCreationJobs`／`persistence.enableGenerationStatus`，
+> 預設皆為 `true`）——這是純測試用的實作細節，**不改變本檔任何條文描述的可觀察行為**：
+> 兩個旗標維持預設值時，行為與本檔其餘描述完全一致；關閉旗標僅供本機手動測試時避免服務重啟
+> 卡住 job/生成鎖，不屬於正式環境的支援配置，因此不另立 Requirement/Scenario。詳見
+> `chat-service/CLAUDE.md` 與 `config.txt`。
 
 ## Purpose
 
