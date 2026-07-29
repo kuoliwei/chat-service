@@ -586,8 +586,10 @@ export const conversationService = {
     // 的 where 條件做「檢查後更新」；關閉時用記憶體 Map + 單執行緒同步區塊，效果相同。
     // where/檢查條件涵蓋「目前不是 generating」或「是 generating 但已超過殭屍鎖時限」，
     // 回傳 false 代表這兩個條件都不成立（別人正持有有效的鎖），視為搶鎖失敗。
+    // 🔑 tempUserId 一併傳入：上鎖同時標記「本回合身分」並清掉上一回合殘留的訊息 ID，
+    // 讓前端輪詢能分辨讀到的狀態屬於哪一回合（詳見 tryAcquireLock 的註解）。
     const staleLimitMs = (config.ai?.timeouts?.generateResponse || 60000) + 30000;
-    const acquired = await generationStatusRepository.tryAcquireLock(conversation.id, staleLimitMs);
+    const acquired = await generationStatusRepository.tryAcquireLock(conversation.id, staleLimitMs, { tempUserId });
 
     if (!acquired) {
       console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中，拒絕新訊息`);

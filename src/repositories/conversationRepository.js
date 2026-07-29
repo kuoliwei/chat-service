@@ -182,7 +182,16 @@ export const generationStatusRepository = {
   // enabled 時用 DB updateMany 的 where 條件做「檢查後更新」保證原子性；
   // disabled 時利用 Node 單執行緒特性，同步檢查後立刻寫入 Map，中間不 await，
   // 天然不會被其他請求插隊（與持久化之前的舊版邏輯相同）。
-  async tryAcquireLock(conversationId, staleLimitMs) {
+  //
+  // 🔑 【回合身分】上鎖 = 「本回合開始」的唯一原子性時間點，因此這裡必須順手做兩件事：
+  //   1. 寫入本回合的 tempUserId（前端樂觀更新的臨時訊息 ID）
+  //   2. 把 userMessageId / assistantMessageId 清成 null
+  // 否則這三個欄位會一路留著「上一回合」setCompleted 寫進去的值（只有 setCompleted
+  // 會寫它們），使 generating 狀態變成「狀態碼是新的、訊息 ID 是舊的」的混合體。
+  // 前端在 POST 尚未抵達本行之前就已開始輪詢，讀到那種混合狀態會誤把剛送出的訊息
+  // 換成上一回合的舊訊息並停止輪詢——畫面上兩個氣泡一閃消失。
+  // 搶鎖失敗時不得修改任何欄位（否則會污染別人正在進行的回合）。
+  async tryAcquireLock(conversationId, staleLimitMs, { tempUserId } = {}) {
     if (!config.persistence?.enableGenerationStatus) {
       const existing = memoryGenerationStatus.get(conversationId);
       if (existing && existing.status === 'generating') {
@@ -192,9 +201,13 @@ export const generationStatusRepository = {
         }
         console.warn(`⚠️  [generationStatusRepository] 偵測到殭屍鎖: 聊天室 ${conversationId} 的 generating 狀態已掛 ${Math.round(lockAgeMs / 1000)} 秒，視為失效並放行`);
       }
+      // 整筆覆寫（不 spread existing）：與 DB 分支一樣達成「清空上一回合訊息 ID」的效果
       memoryGenerationStatus.set(conversationId, {
         status: 'generating',
         error: null,
+        tempUserId: tempUserId || null,
+        userMessageId: null,
+        assistantMessageId: null,
         updatedAt: new Date(),
       });
       return true;
@@ -213,6 +226,9 @@ export const generationStatusRepository = {
       data: {
         generationStatus: 'generating',
         generationError: null,
+        generationTempUserId: tempUserId || null,
+        generationUserMessageId: null,
+        generationAssistantMessageId: null,
         generationUpdatedAt: new Date(),
       },
     });
@@ -254,6 +270,11 @@ export const generationStatusRepository = {
     });
   },
 
+  // ⚠️ 【不要清 tempUserId】本回合的 tempUserId 已由 tryAcquireLock 在上鎖時寫入，
+  // setFailed 必須原封保留它——前端靠這個欄位判斷「這個 failed 屬於哪一回合」，
+  // 才能立刻把佔位符換成失敗氣泡。若為了「清乾淨」而在這裡把它設成 null，
+  // 前端的回合守門會擋掉真實失敗，使用者要等滿 120 秒輪詢超時才看得到失敗訊息，
+  // 而且沒有任何自動化測試會抓到（本服務零測試框架）。
   async setFailed(conversationId, errorMessage) {
     if (!config.persistence?.enableGenerationStatus) {
       const existing = memoryGenerationStatus.get(conversationId) || {};
