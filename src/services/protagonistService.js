@@ -45,7 +45,7 @@ export async function getProtagonist(userId, conversationId) {
 export async function updateProtagonist(userId, conversationId, protagonistName, protagonistBackground) {
   await assertConversationOwnership(userId, conversationId);
 
-  console.log(`\n👤 [conversationService] 更新主角人設: conversationId=${conversationId}`);
+  console.log(`\n👤 [protagonistService] 更新主角人設: conversationId=${conversationId}`);
   console.log(`   ├─ 名稱: ${protagonistName || '(空)'}`);
   console.log(`   ├─ 背景: ${(protagonistBackground || '').length} 字`);
 

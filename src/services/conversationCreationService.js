@@ -161,7 +161,7 @@ export async function getOrCreateConversation(userId, characterId) {
   // 🆕 為每個請求分配唯一 ID，用於追蹤並發請求
   const requestId = ++requestCounter;
   const timestamp = new Date().toISOString().split('T')[1];
-  console.log(`\n📨 [conversationService] 收到建立聊天室請求 #${requestId} (${timestamp}): userId=${userId}, characterId=${characterId}`);
+  console.log(`\n📨 [conversationCreationService] 收到建立聊天室請求 #${requestId} (${timestamp}): userId=${userId}, characterId=${characterId}`);
 
   validateUserId(userId);
 
@@ -281,17 +281,17 @@ export async function retryConversationCreation(userId, characterId) {
   const job = await conversationCreationJobRepository.findByKey(userId, characterId);
 
   if (!job) {
-    console.log(`  ⚠️  [conversationService] job 不存在，無需清除: ${userId}:${characterId}`);
+    console.log(`  ⚠️  [conversationCreationService] job 不存在，無需清除: ${userId}:${characterId}`);
     throw new Error('NO_FAILED_JOB');
   }
 
   if (job.status !== 'failed') {
-    console.log(`  ⚠️  [conversationService] job 狀態不是 failed (status=${job.status})，無法重試`);
+    console.log(`  ⚠️  [conversationCreationService] job 狀態不是 failed (status=${job.status})，無法重試`);
     throw new Error('JOB_NOT_FAILED');
   }
 
   // 清除失敗 job，允許重新開始
-  console.log(`  🔄 [conversationService] 清除失敗 job，允許重試: ${userId}:${characterId}`);
+  console.log(`  🔄 [conversationCreationService] 清除失敗 job，允許重試: ${userId}:${characterId}`);
   await conversationCreationJobRepository.delete(userId, characterId);
 
   return {

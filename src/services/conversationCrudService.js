@@ -17,11 +17,11 @@ import { validateUserId, assertConversationOwnership } from './conversationOwner
  * @throws {Error} 'SERVICE_ERROR' 前綴——RAG 清理失敗（呼叫端據此中斷刪除流程）
  */
 async function cleanupConversationRAG(conversationId) {
-  console.log(`🧹 [conversationService] 清理 RAG 資料: conversationId=${conversationId}`);
+  console.log(`🧹 [conversationCrudService] 清理 RAG 資料: conversationId=${conversationId}`);
   // 🆕 【被動報錯】RAG 清理失敗時直接拋異常，中斷刪除流程
   // 呼叫端必須先清 RAG、成功後才刪 DB，確保不會留下孤兒資料
   await serviceClient.cleanupRAG(conversationId);
-  console.log(`✅ [conversationService] RAG 清理成功`);
+  console.log(`✅ [conversationCrudService] RAG 清理成功`);
 }
 
 /**
@@ -91,7 +91,7 @@ export async function deleteConversation(userId, conversationId) {
 
   // RAG 清理成功，才刪除對話（訊息會自動刪除，因為有 onDelete: Cascade）
   // AI 生成狀態存在 Conversation 表本身的欄位，整筆記錄刪除後自然一併清除，不需額外處理。
-  console.log(`🗑️ [conversationService] 刪除對話: conversationId=${conversationId}`);
+  console.log(`🗑️ [conversationCrudService] 刪除對話: conversationId=${conversationId}`);
   await conversationRepository.delete(conversationId);
 
   return { message: 'Conversation deleted successfully' };
@@ -128,14 +128,14 @@ export async function deleteConversationsByCharacter(userId, characterId) {
   }
 
   // 🆕 【順序調換】先清理每個對話的 RAG 資料，失敗會拋錯中斷，此時 DB 還完好
-  console.log(`🧹 [conversationService] 清理 RAG 資料: 共 ${conversations.length} 個聊天室`);
+  console.log(`🧹 [conversationCrudService] 清理 RAG 資料: 共 ${conversations.length} 個聊天室`);
   for (const conversation of conversations) {
     await cleanupConversationRAG(conversation.id);
   }
 
   // RAG 全部清理成功，才刪除所有對話
   // AI 生成狀態存在 Conversation 表本身的欄位，整筆記錄刪除後自然一併清除，不需額外處理。
-  console.log(`🗑️ [conversationService] 刪除角色對話: userId=${userId}, characterId=${characterId}, count=${conversations.length}`);
+  console.log(`🗑️ [conversationCrudService] 刪除角色對話: userId=${userId}, characterId=${characterId}, count=${conversations.length}`);
   await conversationRepository.deleteByCharacterId(characterId, userId);
 
   return {

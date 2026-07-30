@@ -55,7 +55,7 @@ export function checkIfNeedsSummary(messages, threshold = null, shortTermLimit =
     console.log(`🐛 [DEBUG]   排除 ${idx + 1}. id=${msg.id} [${msg.role}] createdAt=${msg.createdAt?.toISOString?.() || msg.createdAt} | ${msg.text}`);
   });
 
-  console.log(`📊 [conversationService] 摘要檢查: 歷史字數=${historyLength}, 閾值=${threshold}, 需要摘要=${historyLength >= threshold}`);
+  console.log(`📊 [summaryService] 摘要檢查: 歷史字數=${historyLength}, 閾值=${threshold}, 需要摘要=${historyLength >= threshold}`);
 
   if (historyLength >= threshold) {
     return {
@@ -81,7 +81,7 @@ export async function executeSummary(conversationId, messagesToSummarize) {
     return null;
   }
 
-  console.log(`\n♻️  [conversationService] 啟動摘要機制: conversationId=${conversationId}, 訊息數=${messagesToSummarize.length}`);
+  console.log(`\n♻️  [summaryService] 啟動摘要機制: conversationId=${conversationId}, 訊息數=${messagesToSummarize.length}`);
 
   // 1. 組裝要摘要的文本
   const textToSummarize = messagesToSummarize

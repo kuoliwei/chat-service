@@ -209,7 +209,7 @@ export async function deleteMessageAndSubsequent(userId, conversationId, message
   // 🆕 【生成中拒絕】AI 正在生成時不允許刪除（生成完成會存入新訊息，會打架）
   const deleteTimeGenStatus = generationStatusRepository.get(ownedConversation);
   if (deleteTimeGenStatus?.status === 'generating') {
-    console.log(`🚫 [conversationService] 聊天室 ${conversationId} AI 生成中，拒絕刪除訊息`);
+    console.log(`🚫 [messageService] 聊天室 ${conversationId} AI 生成中，拒絕刪除訊息`);
     throw new Error('AI_GENERATION_IN_PROGRESS');
   }
 
@@ -239,7 +239,7 @@ export async function deleteMessageAndSubsequent(userId, conversationId, message
   const messagesToDelete = allMessages.slice(targetIndex);
   const idsToDelete = messagesToDelete.map(m => m.id);
 
-  console.log(`\n🗑️ [conversationService] ===== 回溯刪除開始: conversationId=${conversationId} =====`);
+  console.log(`\n🗑️ [messageService] ===== 回溯刪除開始: conversationId=${conversationId} =====`);
   console.log(`🐛 [DEBUG] 目標訊息: id=${messageId}（位置 ${targetIndex + 1}/${allMessages.length}）`);
 
   // 🐛 【DEBUG】對話全貌：每條訊息的位置、id、摘要歸屬，並標記刪除線
@@ -297,7 +297,7 @@ export async function deleteMessageAndSubsequent(userId, conversationId, message
   console.log(`🐛 [DEBUG] 步驟 3/3: 刪除 DB 訊息...`);
   const result = await messageRepository.deleteManyByIds(idsToDelete);
   console.log(`🐛 [DEBUG] 步驟 3/3 ✅ 已刪除 ${result.count} 條訊息`);
-  console.log(`🗑️ [conversationService] ===== 回溯刪除完成 =====\n`);
+  console.log(`🗑️ [messageService] ===== 回溯刪除完成 =====\n`);
 
   // 清除該聊天室的舊生成狀態（completed/failed 已無意義）
   await generationStatusRepository.reset(conversationId);

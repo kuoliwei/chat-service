@@ -50,7 +50,7 @@ async function buildAIServiceRequest(conversationId, conversation, messages) {
     protagonist_name: conversation.protagonistName || null
   };
 
-  console.log(`📦 [conversationService] 組裝 AI 請求: conversationId=${conversationId}, 訊息數=${conversationHistory.length}`);
+  console.log(`📦 [aiGenerationService] 組裝 AI 請求: conversationId=${conversationId}, 訊息數=${conversationHistory.length}`);
 
   return request;
 }
@@ -71,7 +71,7 @@ export async function _generateAIResponseAsync(conversation, allMessages, userTe
       ...allMessages,
       { role: 'user', text: userText, createdAt: new Date().toISOString() }
     ];
-    console.log(`📋 [conversationService] AI 上下文訊息數: ${messagesForAI.length}`);
+    console.log(`📋 [aiGenerationService] AI 上下文訊息數: ${messagesForAI.length}`);
 
     // 組裝請求
     const aiRequest = await buildAIServiceRequest(conversation.id, conversation, messagesForAI);
@@ -79,10 +79,10 @@ export async function _generateAIResponseAsync(conversation, allMessages, userTe
     // 呼叫 AI 服務
     const result = await serviceClient.generateResponse(aiRequest);
     const aiResponse = result.message;
-    console.log(`✅ [conversationService] AI 回應已取得`);
+    console.log(`✅ [aiGenerationService] AI 回應已取得`);
 
     // 🆕 【原子性保存】同時創建用戶訊息 + AI 訊息
-    console.log(`💾 [conversationService] 開始原子性保存：用戶訊息 + AI 訊息...`);
+    console.log(`💾 [aiGenerationService] 開始原子性保存：用戶訊息 + AI 訊息...`);
 
     // 1. 先保存用戶訊息
     const userMessage = await messageRepository.create({
@@ -90,7 +90,7 @@ export async function _generateAIResponseAsync(conversation, allMessages, userTe
       role: 'user',
       text: userText,
     });
-    console.log(`📝 [conversationService] 用戶訊息已保存: id=${userMessage.id}`);
+    console.log(`📝 [aiGenerationService] 用戶訊息已保存: id=${userMessage.id}`);
 
     // 2. 再保存 AI 訊息
     const assistantMessage = await messageRepository.create({
@@ -100,7 +100,7 @@ export async function _generateAIResponseAsync(conversation, allMessages, userTe
       status: 'completed',
     });
 
-    console.log(`💬 [conversationService] AI 訊息已創建: id=${assistantMessage.id}`);
+    console.log(`💬 [aiGenerationService] AI 訊息已創建: id=${assistantMessage.id}`);
     console.log(`  【DEBUG】AI 訊息詳情: ID: ${assistantMessage.id.substring(0, 8)}..., status: ${assistantMessage.status}, createdAt: ${assistantMessage.createdAt}`);
 
     // 記錄成功狀態，讓前端可以檢測到生成完成
@@ -110,18 +110,18 @@ export async function _generateAIResponseAsync(conversation, allMessages, userTe
       userMessageId: userMessage.id,
       assistantMessageId: assistantMessage.id,
     });
-    console.log(`✅ [conversationService] AI 生成狀態已更新為 'completed'`);
+    console.log(`✅ [aiGenerationService] AI 生成狀態已更新為 'completed'`);
     console.log(`🐛 [DEBUG] ===== 配對資訊已寫入 =====`);
     console.log(`🐛 [DEBUG]   tempUserId（前端臨時）: ${tempUserId || null}`);
     console.log(`🐛 [DEBUG]   userMessageId（真實）: ${userMessage.id}`);
     console.log(`🐛 [DEBUG]   assistantMessageId（真實）: ${assistantMessage.id}`);
   } catch (error) {
-    console.error(`❌ [conversationService] 背景生成失敗:`, error.message);
-    console.log(`⚠️  [conversationService] 用戶訊息與 AI 訊息都不保存（失敗時不持久化）`);
+    console.error(`❌ [aiGenerationService] 背景生成失敗:`, error.message);
+    console.log(`⚠️  [aiGenerationService] 用戶訊息與 AI 訊息都不保存（失敗時不持久化）`);
 
     // 記錄失敗狀態，讓前端可以查詢
     await generationStatusRepository.setFailed(conversation.id, error.message);
-    console.log(`⚠️  [conversationService] AI 回應失敗已記錄，前端將透過狀態查詢偵測`);
+    console.log(`⚠️  [aiGenerationService] AI 回應失敗已記錄，前端將透過狀態查詢偵測`);
   }
 }
 
@@ -168,15 +168,15 @@ export async function sendMessageToConversation(userId, conversationId, text, te
   const acquired = await generationStatusRepository.tryAcquireLock(conversation.id, staleLimitMs, { tempUserId });
 
   if (!acquired) {
-    console.log(`🚫 [conversationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中，拒絕新訊息`);
+    console.log(`🚫 [aiGenerationService] 聊天室 ${conversation.id} 已有 AI 生成任務進行中，拒絕新訊息`);
     throw new Error('AI_GENERATION_IN_PROGRESS');
   }
-  console.log(`🔒 [conversationService] 已上鎖（generating），開始處理訊息`);
+  console.log(`🔒 [aiGenerationService] 已上鎖（generating），開始處理訊息`);
 
   // 🆕 【重大改動】不立即保存用戶訊息
   // 改為：在 AI 生成成功後，才同時保存用戶訊息 + AI 回覆
   // 這樣可以避免：AI 生成失敗時，用戶訊息孤立在資料庫
-  console.log(`⏳ [conversationService] 暫不保存用戶訊息，等待 AI 生成結果...`);
+  console.log(`⏳ [aiGenerationService] 暫不保存用戶訊息，等待 AI 生成結果...`);
 
   // 🆕 【失敗解鎖】上鎖後、啟動異步任務前，任何環節拋錯都要先解鎖再拋出
   // 否則鎖會殘留在 Map 中，聊天室被永久鎖死
@@ -194,14 +194,14 @@ export async function sendMessageToConversation(userId, conversationId, text, te
     // 🆕 檢查並執行摘要機制（先摘要，再生成回應）
     const summaryCheck = checkIfNeedsSummary(unsummarizedMessages);
     if (summaryCheck && summaryCheck.needsSummary) {
-      console.log(`[conversationService] 檢測到需要摘要，先執行摘要...`);
+      console.log(`[aiGenerationService] 檢測到需要摘要，先執行摘要...`);
       await executeSummary(conversation.id, summaryCheck.messagesToSummarize);
       // 摘要完成後，重新獲取未摘要的訊息
       unsummarizedMessages = await messageRepository.findUnsummarized(conversation.id);
     }
   } catch (error) {
     // 解鎖後再拋出，讓 controller 回傳錯誤
-    console.log(`🔓 [conversationService] 前置流程失敗，解鎖並拋出: ${error.message}`);
+    console.log(`🔓 [aiGenerationService] 前置流程失敗，解鎖並拋出: ${error.message}`);
     await generationStatusRepository.releaseLock(conversation.id);
     throw error;
   }
@@ -216,7 +216,7 @@ export async function sendMessageToConversation(userId, conversationId, text, te
 
   // 在背景異步生成 AI 回覆（不 await，不創建占位符）
   // 注意：'generating' 鎖已在流程開頭（檢查後）原子性地上好，此處不再重複寫入
-  console.log(`⏳ [conversationService] 背景生成 AI 回覆`);
+  console.log(`⏳ [aiGenerationService] 背景生成 AI 回覆`);
 
   // 🆕 傳入用戶訊息文本與臨時 ID，讓異步任務保存並回報配對
   // （拆檔前這裡是 this._generateAIResponseAsync；改為直接呼叫模組內函式，
@@ -252,7 +252,7 @@ export async function getAIGenerationStatus(userId, conversationId) {
     };
   }
 
-  console.log(`📊 [conversationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${genStatus.status}`);
+  console.log(`📊 [aiGenerationService] 查詢 AI 生成狀態: conversationId=${conversationId}, 狀態=${genStatus.status}`);
 
   return {
     status: genStatus.status,
@@ -282,6 +282,6 @@ export async function clearAIGenerationStatus(userId, conversationId) {
 
   if (genStatus) {
     await generationStatusRepository.reset(conversationId);
-    console.log(`🗑️ [conversationService] 已清除 AI 生成狀態: conversationId=${conversationId}`);
+    console.log(`🗑️ [aiGenerationService] 已清除 AI 生成狀態: conversationId=${conversationId}`);
   }
 }
