@@ -859,6 +859,7 @@ export const conversationService = {
    * @param {string} conversationId - 對話 ID
    * @returns {Promise<{message: string}>}
    * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
    * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
    * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
    * @throws {Error} 'SERVICE_ERROR' 若 RAG 清理失敗（前綴，實際訊息由 ai-service 回傳）
@@ -936,6 +937,7 @@ export const conversationService = {
    * @param {string} conversationId - 對話 ID
    * @returns {Promise<{protagonistName: string|null, protagonistBackground: string|null}>}
    * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
    * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
    * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
    */
@@ -956,6 +958,7 @@ export const conversationService = {
    * @param {string} [protagonistBackground] - 主角背景文本
    * @returns {Promise<{protagonistName: string|null, protagonistBackground: string|null}>}
    * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
    * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
    * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
    * @throws {Error} 'SERVICE_ERROR' 若 RAG 更新失敗
@@ -1208,6 +1211,7 @@ export const conversationService = {
    * @returns {Promise<Object>} { status: 'generating'|'completed'|'failed'|'unknown', error?,
    *   tempUserId?, userMessageId?, assistantMessageId?, timestamp? }
    * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
    * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
    * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
    */
@@ -1243,6 +1247,7 @@ export const conversationService = {
    * @param {string} conversationId - 對話 ID
    * @returns {Promise<void>}
    * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
    * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
    * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
    */

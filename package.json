@@ -5,7 +5,8 @@
   "main": "src/app.js",
   "type": "module",
   "scripts": {
-    "dev": "node src/app.js"
+    "dev": "node src/app.js",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
@@ -19,7 +20,8 @@
     "express": "^5.2.1"
   },
   "devDependencies": {
-    "prisma": "^5.21.0"
+    "prisma": "^5.21.0",
+    "vitest": "^4.1.8"
   },
   "allowScripts": {
     "@prisma/client@5.22.0": true,
