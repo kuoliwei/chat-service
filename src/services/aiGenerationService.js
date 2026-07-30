@@ -151,26 +151,12 @@ export async function sendMessageToConversation(userId, conversationId, text, te
     throw new Error('MISSING_TEXT');
   }
 
-  // 🆕 【實驗性註解】暫時停用健檢觸發，觀察無健檢時錯誤是否仍能正確傳播
-  // // 🆕 【健康檢查】模仿建立聊天室的方式，先檢查 AI Service
-  // console.log(`🏥 [conversationService] 檢查 AI Service 健康狀態...`);
-  // try {
-  //   await serviceClient.checkAIServiceHealth();
-  //   console.log(`✅ [conversationService] AI Service 健康，繼續發送訊息`);
-  // } catch (error) {
-  //   // 🆕 【統一錯誤處理】捕獲具體的錯誤信息，而不是使用固定的通用消息
-  //   console.error(`❌ [conversationService] AI Service 無法連接: ${error.message}`);
-  //
-  //   // 記錄失敗狀態到 DB，讓前端可以立即查詢（使用具體的錯誤信息）
-  //   await conversationRepository.update(conversation.id, {
-  //     generationStatus: 'failed',
-  //     generationError: error.message,  // ← 使用具體的錯誤信息
-  //     generationUpdatedAt: new Date(),
-  //   });
-  //   throw new Error(`AI_SERVICE_UNAVAILABLE: ${error.message}`);
-  // }
+  // 註：這裡曾有一段「先檢查 AI Service 健康」的前置健檢，2026-07 實驗性停用後確認
+  // 不需要——ai-service 不可用時，背景生成的 generateResponse 會拋錯並由
+  // _generateAIResponseAsync 記成 failed 狀態，前端輪詢照樣讀得到失敗原因。
+  // 已於 2026-07-30 連同 checkAIServiceHealth 一併移除。
 
-  // 🆕 【第二步：拒絕並行生成】同一聊天室已有任務進行中 → 拒絕
+  // 🆕 【拒絕並行生成】同一聊天室已有任務進行中 → 拒絕
   // 原子性搶鎖交給 generationStatusRepository：persistence 開啟時用 DB updateMany
   // 的 where 條件做「檢查後更新」；關閉時用記憶體 Map + 單執行緒同步區塊，效果相同。
   // where/檢查條件涵蓋「目前不是 generating」或「是 generating 但已超過殭屍鎖時限」，

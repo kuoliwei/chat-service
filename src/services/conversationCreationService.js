@@ -244,21 +244,11 @@ export async function getOrCreateConversation(userId, characterId) {
     }
   }
 
-  // === 步驟 3：沒有 job → 【新增】先檢查 AI Service 健康 ===
-  // 🆕 【實驗性註解】暫時停用健檢觸發，觀察無健檢時錯誤是否仍能正確傳播
-  // console.log(`  ├─ 【請求 #${requestId}】[步驟 3] 檢查 AI Service 健康狀態...`);
-  // try {
-  //   await serviceClient.checkAIServiceHealth();
-  // } catch (error) {
-  //   // 🆕 【統一風格】用 throw error，而不是返回錯誤對象
-  //   // 這樣可以使用具體的錯誤信息，而不是固定的通用消息
-  //   console.log(`  ├─ 【請求 #${requestId}】❌ AI Service 無法連接: ${error.message}`);
-  //   const errorMsg = error.message;
-  //   await conversationCreationJobRepository.upsert(userId, characterId, { status: 'failed', error: errorMsg });
-  //   throw new Error(`AI_SERVICE_UNAVAILABLE: ${errorMsg}`);
-  // }
-
-  // === 步驟 4：AI Service 可用 → 啟動背景建立，立即回傳 preparing ===
+  // === 步驟 3：啟動背景建立，立即回傳 preparing ===
+  // 註：這裡曾有一段「先檢查 AI Service 健康」的前置健檢，2026-07 實驗性停用後確認
+  // 不需要——ai-service 不可用時，背景任務的 initializeRAG/checkRAGStatus 會拋
+  // SERVICE_ERROR，job 被標記為 failed，輪詢端下一輪就會收到 failed，錯誤照樣傳得到前端。
+  // 既然錯誤傳播路徑已足夠，健檢屬多餘的往返，已於 2026-07-30 連同 checkAIServiceHealth 一併移除。
   const conversationId = generateConversationId();
   await conversationCreationJobRepository.upsert(userId, characterId, { status: 'preparing', conversationId });
   console.log(`  ├─ 【請求 #${requestId}】[步驟 4] ✅ 創建新 job，允許該請求繼續`);

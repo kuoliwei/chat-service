@@ -45,8 +45,6 @@ vi.mock('../repositories/conversationRepository.js', () => ({
 vi.mock('../lib/serviceClient.js', () => ({
   serviceClient: {
     getCharacter: vi.fn(),
-    getUser: vi.fn(),
-    checkAIServiceHealth: vi.fn(),
     initializeRAG: vi.fn(),
     cleanupRAG: vi.fn(),
     generateResponse: vi.fn(),

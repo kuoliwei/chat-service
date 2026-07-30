@@ -1,7 +1,7 @@
 import { conversationService } from '../services/conversationService.js';
 
 // 固定 status + 固定 message 的錯誤碼查表；帶動態內容或依端點語意不同的錯誤碼
-// （AI_GENERATION_IN_PROGRESS、AI_SERVICE_UNAVAILABLE:/SERVICE_ERROR: 前綴等）不納入，維持個別處理
+// （AI_GENERATION_IN_PROGRESS、SERVICE_ERROR: 前綴等）不納入，維持個別處理
 const ERROR_MAP = {
   UNAUTHORIZED: { status: 401, message: 'Unauthorized' },
   MISSING_CHARACTER_ID: { status: 400, message: 'Missing characterId' },
@@ -50,11 +50,6 @@ export const conversationController = {
     } catch (error) {
       if (error.message === 'FORBIDDEN') {
         return res.status(403).json({ error: 'FORBIDDEN', message: 'Access denied to this character' });
-      }
-      // 🆕 【統一風格】AI Service 不可用（包含具體錯誤信息）
-      if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
-        const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
-        return res.status(503).json({ error: 'AI_SERVICE_UNAVAILABLE', message: specificError });
       }
       const mapped = ERROR_MAP[error.message];
       if (mapped) {
@@ -149,16 +144,6 @@ export const conversationController = {
       // 🆕 【並行防護】同一聊天室已有 AI 生成任務進行中 → 409 Conflict
       if (error.message === 'AI_GENERATION_IN_PROGRESS') {
         return res.status(409).json({ error: 'AI_GENERATION_IN_PROGRESS', message: '上一條訊息仍在處理中，請等待回覆完成後再發送' });
-      }
-      // 🆕 AI Service 不可用（包含具體錯誤信息）
-      if (error.message.startsWith('AI_SERVICE_UNAVAILABLE')) {
-        // 提取具體的錯誤信息（格式：AI_SERVICE_UNAVAILABLE: [具體錯誤]）
-        const specificError = error.message.replace('AI_SERVICE_UNAVAILABLE: ', '');
-        return res.status(503).json({
-          error: 'AI_SERVICE_UNAVAILABLE',
-          message: specificError,
-          aiGenerationStatus: { status: 'failed', error: specificError }
-        });
       }
       const mapped = ERROR_MAP[error.message];
       if (mapped) {
