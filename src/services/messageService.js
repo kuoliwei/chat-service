@@ -1,4 +1,5 @@
-import { conversationRepository, messageRepository, generationStatusRepository } from '../repositories/conversationRepository.js';
+import { conversationRepository, messageRepository } from '../repositories/conversationRepository.js';
+import { generationStatusRepository } from '../repositories/generationStatusRepository.js';
 import { serviceClient } from '../lib/serviceClient.js';
 import { validateUserId, assertConversationOwnership } from './conversationOwnership.js';
 

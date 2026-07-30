@@ -45,8 +45,8 @@ import {
   conversationRepository,
   messageRepository,
   conversationCreationJobRepository,
-  generationStatusRepository,
 } from './conversationRepository.js';
+import { generationStatusRepository } from './generationStatusRepository.js';
 
 const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 afterAll(() => consoleWarnSpy.mockRestore());

@@ -32,6 +32,10 @@ vi.mock('../repositories/conversationRepository.js', () => ({
     upsert: vi.fn(),
     delete: vi.fn(),
   },
+}));
+
+// 生成鎖協定獨立成檔（並行控制語意與純 CRUD 不同種類），因此分開 mock
+vi.mock('../repositories/generationStatusRepository.js', () => ({
   generationStatusRepository: {
     get: vi.fn(),
     tryAcquireLock: vi.fn(),
@@ -68,8 +72,8 @@ import {
   conversationRepository,
   messageRepository,
   conversationCreationJobRepository,
-  generationStatusRepository,
 } from '../repositories/conversationRepository.js';
+import { generationStatusRepository } from '../repositories/generationStatusRepository.js';
 import { serviceClient } from '../lib/serviceClient.js';
 import { conversationService } from './conversationService.js';
 
