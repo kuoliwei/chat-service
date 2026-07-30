@@ -19,6 +19,59 @@ const ERROR_MAP = {
   NO_CONVERSATIONS_FOUND: { status: 404, message: 'No conversations found for this character' },
 };
 
+/**
+ * 統一的錯誤回應（與 auth / user / character 三服務的 respondError 慣例一致）
+ *
+ * 判斷順序：端點特有的覆寫 → SERVICE_ERROR 前綴 → 共用 ERROR_MAP → 500。
+ * 覆寫擺第一是因為同一個錯誤碼在不同端點的語意確實不同——例如
+ * AI_GENERATION_IN_PROGRESS 在發送端點要說「請等待回覆完成後再發送」，
+ * 在刪除端點要說「請等待回覆完成後再刪除」；壓成同一句會讓前端無法給出正確提示。
+ *
+ * 日誌慣例（比照 character-service）：只有未命中 ERROR_MAP 的非預期例外才印 ❌，
+ * 已知的語意錯誤（400/401/403/404/409）不重複印。
+ *
+ * @param {Object} res - Express response
+ * @param {Error} error - service 層拋出的語意錯誤
+ * @param {Object} [options]
+ * @param {Object} [options.overrides] - 端點特有的錯誤碼覆寫 `{ CODE: { status, message } }`
+ * @param {string} [options.serviceErrorPrefix] - 提供時，SERVICE_ERROR 回 503 且訊息為
+ *   `${prefix}: ${ai-service 回傳的細節}`；未提供則 SERVICE_ERROR 落到 500
+ * @returns {Object} Express response
+ */
+function respondWithError(res, error, { overrides, serviceErrorPrefix } = {}) {
+  const override = overrides?.[error.message];
+  if (override) {
+    return res.status(override.status).json({ error: error.message, message: override.message });
+  }
+
+  // SERVICE_ERROR 帶 ai-service 回傳的動態細節，且各端點要說明「什麼沒被做掉」
+  if (serviceErrorPrefix && error.message.startsWith('SERVICE_ERROR')) {
+    const detail = error.message.replace('SERVICE_ERROR: ', '');
+    return res.status(503).json({ error: 'SERVICE_ERROR', message: `${serviceErrorPrefix}: ${detail}` });
+  }
+
+  const mapped = ERROR_MAP[error.message];
+  if (mapped) {
+    return res.status(mapped.status).json({ error: error.message, message: mapped.message });
+  }
+
+  console.error('❌ [conversationController]', error);
+  return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+}
+
+// 端點特有的錯誤覆寫（同一錯誤碼在不同端點語意不同，不能壓平成共用表）
+const FORBIDDEN_ON_CHARACTER = {
+  FORBIDDEN: { status: 403, message: 'Access denied to this character' },
+};
+const INVALID_REQUEST_ON_SEND = {
+  MISSING_CONVERSATION_ID: { status: 400, message: 'Invalid request' },
+  MISSING_TEXT: { status: 400, message: 'Invalid request' },
+  AI_GENERATION_IN_PROGRESS: { status: 409, message: '上一條訊息仍在處理中，請等待回覆完成後再發送' },
+};
+const GENERATION_IN_PROGRESS_ON_DELETE = {
+  AI_GENERATION_IN_PROGRESS: { status: 409, message: 'AI 正在回覆中，請等待回覆完成後再刪除' },
+};
+
 export const conversationController = {
   async getOrCreateConversation(req, res) {
     try {
@@ -48,15 +101,7 @@ export const conversationController = {
       console.log(`   → HTTP 200 Ready (conversationId: ${result.conversationId})\n`);
       return res.status(200).json(result);
     } catch (error) {
-      if (error.message === 'FORBIDDEN') {
-        return res.status(403).json({ error: 'FORBIDDEN', message: 'Access denied to this character' });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error, { overrides: FORBIDDEN_ON_CHARACTER });
     }
   },
 
@@ -70,12 +115,7 @@ export const conversationController = {
 
       return res.status(200).json(conversations);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -89,12 +129,7 @@ export const conversationController = {
 
       return res.status(200).json(summary);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -110,13 +145,7 @@ export const conversationController = {
 
       return res.status(201).json(message);
     } catch (error) {
-      console.error('❌ [sendMessage] 錯誤:', error.message);
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -135,22 +164,7 @@ export const conversationController = {
 
       return res.status(201).json(result);
     } catch (error) {
-      console.error('❌ [sendMessageToConversation] 錯誤:', error.message);
-      // 此端點的 MISSING_CONVERSATION_ID/MISSING_TEXT 訊息與其他方法不同（"Invalid request"），
-      // 不納入共用 ERROR_MAP，維持原樣避免行為變更
-      if (['MISSING_CONVERSATION_ID', 'MISSING_TEXT'].includes(error.message)) {
-        return res.status(400).json({ error: error.message, message: 'Invalid request' });
-      }
-      // 🆕 【並行防護】同一聊天室已有 AI 生成任務進行中 → 409 Conflict
-      if (error.message === 'AI_GENERATION_IN_PROGRESS') {
-        return res.status(409).json({ error: 'AI_GENERATION_IN_PROGRESS', message: '上一條訊息仍在處理中，請等待回覆完成後再發送' });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error, { overrides: INVALID_REQUEST_ON_SEND });
     }
   },
 
@@ -166,12 +180,7 @@ export const conversationController = {
 
       return res.status(200).json(messages);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -188,12 +197,7 @@ export const conversationController = {
 
       return res.status(200).json(messages);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -211,17 +215,7 @@ export const conversationController = {
         message: result.message,
       });
     } catch (error) {
-      // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
-      if (error.message.startsWith('SERVICE_ERROR')) {
-        const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ error: 'SERVICE_ERROR', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error, { serviceErrorPrefix: 'RAG 清理失敗，聊天室未刪除' });
     }
   },
 
@@ -240,17 +234,7 @@ export const conversationController = {
         deletedCount: result.deletedCount,
       });
     } catch (error) {
-      // 🆕 RAG 清理失敗（ai-service 不可用等），聊天室未被刪除
-      if (error.message.startsWith('SERVICE_ERROR')) {
-        const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ error: 'SERVICE_ERROR', message: `RAG 清理失敗，聊天室未刪除: ${specificError}` });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error, { serviceErrorPrefix: 'RAG 清理失敗，聊天室未刪除' });
     }
   },
 
@@ -268,12 +252,7 @@ export const conversationController = {
 
       return res.status(200).json(result);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -292,18 +271,8 @@ export const conversationController = {
 
       return res.status(200).json(result);
     } catch (error) {
-      console.error('❌ [updateProtagonist] 錯誤:', error.message);
-      // 🆕 RAG 更新失敗（ai-service 不可用等）→ 503，DB 未被修改
-      if (error.message.startsWith('SERVICE_ERROR')) {
-        const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ error: 'SERVICE_ERROR', message: `主角人設更新失敗: ${specificError}` });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      // RAG 更新失敗（ai-service 不可用等）→ 503，DB 未被修改
+      return respondWithError(res, error, { serviceErrorPrefix: '主角人設更新失敗' });
     }
   },
 
@@ -324,22 +293,11 @@ export const conversationController = {
         deletedIds: result.deletedIds,
       });
     } catch (error) {
-      console.error('❌ [deleteMessageAndSubsequent] 錯誤:', error.message);
-      // 🆕 生成中拒絕刪除 → 409，前端顯示懸浮通知
-      if (error.message === 'AI_GENERATION_IN_PROGRESS') {
-        return res.status(409).json({ error: 'AI_GENERATION_IN_PROGRESS', message: 'AI 正在回覆中，請等待回覆完成後再刪除' });
-      }
-      // 🆕 摘要刪除失敗（RAG 不可用等）→ 503，訊息未被刪除
-      if (error.message.startsWith('SERVICE_ERROR')) {
-        const specificError = error.message.replace('SERVICE_ERROR: ', '');
-        return res.status(503).json({ error: 'SERVICE_ERROR', message: `記憶清理失敗，訊息未刪除: ${specificError}` });
-      }
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      // 生成中拒絕刪除 → 409（前端顯示懸浮通知）；摘要刪除失敗 → 503（訊息未被刪除）
+      return respondWithError(res, error, {
+        overrides: GENERATION_IN_PROGRESS_ON_DELETE,
+        serviceErrorPrefix: '記憶清理失敗，訊息未刪除',
+      });
     }
   },
 
@@ -355,12 +313,7 @@ export const conversationController = {
 
       return res.status(200).json(message);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -378,12 +331,7 @@ export const conversationController = {
       console.log(`   ✅ 失敗狀態已清除，允許重試\n`);
       return res.status(200).json(result);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -404,12 +352,7 @@ export const conversationController = {
 
       return res.status(200).json(status);
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 
@@ -428,12 +371,7 @@ export const conversationController = {
         message: 'AI generation status cleared'
       });
     } catch (error) {
-      const mapped = ERROR_MAP[error.message];
-      if (mapped) {
-        return res.status(mapped.status).json({ error: error.message, message: mapped.message });
-      }
-      console.error('❌ [conversationController]', error);
-      return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' });
+      return respondWithError(res, error);
     }
   },
 };
