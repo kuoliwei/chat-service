@@ -17,11 +17,45 @@
 
 ## 技術棧
 
-Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
+Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）+ Vitest（單元測試）
 
-⚠️ 目前沒有任何測試框架整合、沒有 `*.test.js` 檔案（`package.json` 原本的 `"test": "jest"` 因 jest
-從未安裝而必定失敗，已於 `simplify-chat-service` change 移除該 script，避免誤導）。驗證僅靠
-`test.http` 手動整合測試。
+**測試（2026-07-30 新增）**：`npm test`（= `vitest run`）。
+`src/services/conversationService.test.js` 有 82 則單元測試，覆蓋 service 層全部 17 個
+public 方法的 happy path 與各錯誤碼。測試不碰真實 DB／不發真實 HTTP——
+`conversationRepository.js`（4 個匯出物件）、`serviceClient.js`、`config/index.js`
+三個模組整模組 mock（`vi.mock` factory 模式，與 character-service 一致）。
+⚠️ **`config/index.js` 必須 mock**：`config.json` 未進版控（只有 `config.example.json`），
+真實模組讀不到檔案會 `process.exit(1)`。
+Controller、Repository 層仍無單元測試，路由層行為靠 `test.http` 手動整合測試。
+
+## 分層結構
+
+```
+src/
+├── controllers/conversationController.js  ← HTTP 層，共用 ERROR_MAP 把錯誤碼轉 HTTP 狀態碼
+├── services/                              ← 業務邏輯層（2026-07-30 依職責拆檔）
+│   ├── conversationService.js             ← barrel：重組成 17 方法物件供 controller 使用
+│   ├── conversationOwnership.js           ← 職責 6：擁有權檢查（共用葉節點）
+│   ├── conversationCrudService.js         ← 職責 1：對話 CRUD（讀取／列表／刪除）
+│   ├── conversationCreationService.js     ← 職責 4：對話建立狀態機（含背景建立任務）
+│   ├── messageService.js                  ← 職責 2：訊息 CRUD（含回溯式刪除）
+│   ├── aiGenerationService.js             ← 職責 5：AI 生成狀態機（搶鎖／生成／狀態查詢）
+│   ├── summaryService.js                  ← 職責 3：摘要機制
+│   ├── protagonistService.js              ← 職責 7：主角人設
+│   └── conversationService.test.js        ← 82 則單元測試（打 barrel 這層介面）
+├── repositories/conversationRepository.js ← 純 DB 操作（4 個 repository 物件）
+├── lib/serviceClient.js                   ← 對 ai-service／character-service 的 HTTP 呼叫
+├── config/index.js                        ← 讀取 config.json（未進版控）
+└── app.js                                 ← Express 路由註冊
+```
+
+**拆檔依據**：不是行數，而是根目錄《程式撰寫設計原則.md》第 50-57 行針對本檔列出的職責清單。
+
+**依賴規則（維持單向，避免循環依賴）**：
+- `conversationOwnership.js` 是葉節點——只 import repository，**絕不 import 任何兄弟 service 模組**
+- 各子模組彼此可直接 import（例如 `aiGenerationService` → `summaryService`），
+  但**一律不得 import barrel** `conversationService.js`
+- `conversationCreationJobRepository` 只被 `conversationCreationService.js` 使用，完整封裝在該檔
 
 ## 目前狀態（已實裝）
 
@@ -35,16 +69,17 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 - 主角人設（使用者扮演角色）讀取/更新，更新採**先寫 RAG 再寫 DB**
 - 「重啟聊天室」已移除專用端點，前端改複用「刪除 + 建立」既有管線
 - 並行防護：同一聊天室已有 AI 生成任務進行中時拒絕新訊息（含殭屍鎖逾時保險）與拒絕刪除訊息
-- 集中的擁有權檢查 `assertConversationOwnership`（`conversationService.js`）：所有以 `conversationId` 為主鍵的方法都先過這關，修正過去 4 處方法各自漏寫 userId 驗證的漏洞（跨帳號讀取/寫入）；支援 `{ isInternalRequest }` 選項——gateway 的 `/internal/conversations` 與 `/internal/conversations/:id/messages` 路由轉發過來的內部請求（`x-internal-request: true`）跳過 userId 擁有權比對，供 ai-service 查詢/寫入對話歷史
+- 集中的擁有權檢查 `assertConversationOwnership`（`conversationOwnership.js`）：所有以 `conversationId` 為主鍵的方法都先過這關，修正過去 4 處方法各自漏寫 userId 驗證的漏洞（跨帳號讀取/寫入）；支援 `{ isInternalRequest }` 選項——gateway 的 `/internal/conversations` 與 `/internal/conversations/:id/messages` 路由轉發過來的內部請求（`x-internal-request: true`）跳過 userId 擁有權比對，供 ai-service 查詢/寫入對話歷史
 - Controller 的錯誤碼→HTTP 映射改用共用 `ERROR_MAP` 查表（與 auth/user/character 三服務風格一致）；`sendMessage`（依 characterId）對話不存在時已統一為 404（原為 400，`simplify-chat-service` 唯一的可觀察行為變更）
 
 ### 已知限制
 
 - **大量除錯用 `console.log`**（含明顯的 `🐛 [DEBUG]` 前綴），散布在 controller 與 service 全層——`simplify-chat-service` change（2026-07-25）確認暫緩，非該輪範圍，目前仍未處理
 - `src/config/config.txt`：`config.json` 的說明文件（非程式碼），內容包含已知未使用的 `rag.topK`/`rag.threshold` 欄位，非本輪範圍
-- `conversationService.js` 直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——JS 環境下屬約定俗成，確認不處理
+- service 層各模組直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——JS 環境下屬約定俗成，確認不處理
 
 **已解決（曾是已知限制，現已修正）：**
+- ~~`conversationService.js` 1263 行、7 種職責混在同一檔案，無測試框架不敢拆~~ → 2026-07-30 先補 vitest + 82 則單元測試，再依《程式撰寫設計原則.md》的職責清單拆成 7 個模組（見下方「分層結構」），最大檔 311 行
 - ~~記憶體 Map（`creationJobs`、`aiGenerationStatus`）屬進程內狀態，重啟服務即遺失~~ → 已改為持久化：`ConversationCreationJob` 表 + `Conversation` 表的 `generationStatus` 等欄位（Prisma migration `20260725092955_add_persistent_generation_and_creation_job_state`），2026-07-26 已透過實際重啟服務驗證（K1-K5）狀態正確存活，不再是 12-Factor Processes（無狀態）的違反項
 
 **已清除（本輪處理完成）：**
@@ -117,11 +152,11 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）
 
 ## 演進歷史（節錄自 git log）
 
-依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25）→ 依《微服務架構準則/實作spec》平台級稽核後修正（合併授權邏輯、刪除 `authMiddleware.js`、新增 `x-internal-request` 內部路由支援、`creationJobs`/`aiGenerationStatus` 記憶體 Map 全面改為 Prisma 持久化，commit `b509562`，2026-07-25～26，含重啟服務實測驗證）
+依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25）→ 依《微服務架構準則/實作spec》平台級稽核後修正（合併授權邏輯、刪除 `authMiddleware.js`、新增 `x-internal-request` 內部路由支援、`creationJobs`/`aiGenerationStatus` 記憶體 Map 全面改為 Prisma 持久化，commit `b509562`，2026-07-25～26，含重啟服務實測驗證）→ 程式碼層優化：JSDoc 補完 + 區段註解（commit `d84764f`，2026-07-30）→ 導入 Vitest + 82 則 service 層單元測試（commit `c829512`）→ 依《程式撰寫設計原則》職責清單把 1263 行的 `conversationService.js` 拆成 7 個模組 + barrel（commit `e85fce8`，測試 zero diff 驗證行為不變）
 
 ## 現況補充
 
 - 有 git（`main` branch，已與 origin 同步），**與先前文件「沒有 git」的紀錄不符——已更正**
-- 沒有測試框架整合（`package.json` 已移除斷掉的 `test` script），驗證僅靠 `test.http` 手動整合測試（2026-07-25 驗證：健康檢查、缺 header、角色不存在、`sendMessage`/`sendMessageToConversation` 對話不存在時皆回 404、缺欄位、job 未找到、依角色刪除對話找不到角色等情境皆通過）
+- **2026-07-30 已導入 Vitest**（先前紀錄的「沒有測試框架整合」已過時）：service 層 82 則單元測試，`npm test` 執行。Controller、Repository、路由層仍靠 `test.http` 手動整合測試（2026-07-25 驗證：健康檢查、缺 header、角色不存在、`sendMessage`/`sendMessageToConversation` 對話不存在時皆回 404、缺欄位、job 未找到、依角色刪除對話找不到角色等情境皆通過）
 - 沒有 lint 設定檔
-- **2026-07-27**：`src/config/config.json`、`src/config/config.txt`、`src/repositories/conversationRepository.js`、`src/services/conversationService.js` 有本機未 commit 的改動（持久化開關功能，見上方「目前狀態」）。`config.json` 目前兩個新旗標皆為 `false`（本機測試設定）——commit 前記得確認要不要改回 `true`，或排除該行不進 commit。
+- `src/config/config.json` 未進版控（只有 `config.example.json` 是範本），本機須自備。這也是單元測試必須 mock `config/index.js` 的原因——真實模組讀不到檔案會 `process.exit(1)`。持久化開關 `persistence.enableCreationJobs`／`enableGenerationStatus` 預設應為 `true`，設為 `false` 僅供本機測試。

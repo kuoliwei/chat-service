@@ -177,13 +177,88 @@ JSDoc（@param/@returns/@throws）的對象。
 - console.log 除錯訊息氾濫——已於 2026-07-25 輪確認暫緩。
 - SOLID-DIP（service 直接依賴具體 repository）——已於 2026-07-25 輪確認不處理。
 
-### 拆檔決策：本輪不拆 `conversationService.js`
+### 拆檔決策：本輪不拆 `conversationService.js`（✅ 已於同日稍後推翻並完成）
 
-**理由**：
+**當時的理由**：
 1. 本服務無測試框架，拆檔若打斷共用狀態（`generationStatusRepository`、
    `assertConversationOwnership` 跨方法共用）沒有自動化網可攔截回歸
 2. 2026-07-25 輪 SOLID-SRP 判定已是「低把握、建議列為觀察項」，非明確缺陷
 3. 前三服務的優化範圍皆為「補文件、簡化註解」，不涉及拆檔，維持一致慣例
 
-**緩解方案**：補 JSDoc + 區段註解（`// ========== 職責 X ==========`），達成 A2（內部結構
+**當時的緩解方案**：補 JSDoc + 區段註解（`// ========== 職責 X ==========`），達成 A2（內部結構
 清晰性），將拆檔列為未來獨立工作項（需先補測試才能安全進行）。
+
+> **後續進展（同日）**：使用者指出「補文件不等於實質優化」，決定直接處理擋在前面的前提條件——
+> **先補測試框架，再拆檔**。兩者都已完成，詳見下方「2026-07-30 第三輪」。
+
+---
+
+## 2026-07-30 第三輪：補測試框架 + 依職責拆檔（🔴 高優先度第 1 項已解決）
+
+> 上一節（第二輪）把「1069 行巨型檔案」列為 🔴 高，但只用區段註解緩解，沒有真的解決。
+> 本輪把擋路的前提（無測試安全網）一併處理掉，然後真的拆了。
+
+### 步驟 1：導入測試框架（commit `c829512`）
+
+- 引入 Vitest ^4.1.8（對齊 character-service 既有設定，不需額外 config 檔）
+- `src/services/conversationService.test.js`：**82 則**單元測試，覆蓋全部 17 個 public 方法
+- 三個模組整模組 mock：`conversationRepository.js`（4 個匯出物件）、`serviceClient.js`、`config/index.js`
+
+**關鍵設計**：測試一律透過 `conversationService.X()`（即 controller 用的同一層介面）呼叫，
+不打個別內部函式。因此拆檔前後可以用**完全相同、一個字都不改的斷言**驗證行為不變——
+這是讓拆檔變安全的核心手法。
+
+**⚠️ 踩到的雷**：`config.json` 未進版控（只有 `config.example.json`），而 `config/index.js`
+讀不到檔案會 `process.exit(1)`。測試必須 mock 掉它，否則乾淨環境會整組炸掉、且測試結果
+會被本機設定值污染。
+
+**測試順帶抓到的既有缺陷**：第二輪補的 JSDoc 有 5 個方法漏列 `MISSING_CONVERSATION_ID`
+（`deleteConversation`／`getProtagonist`／`updateProtagonist`／`getAIGenerationStatus`／
+`clearAIGenerationStatus`），已補齊。這證明「寫測試核對文件」確實會抓出光靠閱讀發現不了的落差。
+
+### 步驟 2：依職責拆檔（commit `e85fce8`）
+
+**拆分依據不是行數，而是根目錄《程式撰寫設計原則.md》第 50-57 行針對本檔列出的職責清單**
+（該文件正是拿這個檔案當範例寫的，等於作者早就把答案寫好了）：
+
+| 職責 | 新檔案 | 行數 |
+|------|--------|------|
+| 1. 對話 CRUD（讀取／列表／刪除） | `conversationCrudService.js` | 148 |
+| 2. 訊息 CRUD（含回溯式刪除） | `messageService.js` | 308 |
+| 3. 摘要機制 | `summaryService.js` | 143 |
+| 4. 對話建立狀態機 | `conversationCreationService.js` | 311 |
+| 5. AI 生成狀態機 | `aiGenerationService.js` | 300 |
+| 6. 擁有權檢查 | `conversationOwnership.js` | 61 |
+| 7. 主角人設（文件未列，後來新增的功能） | `protagonistService.js` | 67 |
+| — 組裝層（barrel） | `conversationService.js` | 67 |
+
+**1263 行 → 最大檔 311 行。**
+
+### 設計要點
+
+- **`conversationOwnership.js` 必須維持葉節點**（只 import repository，絕不 import 兄弟模組）：
+  它被 9 個方法共用，放進任何有其他依賴的模組都會製造循環依賴
+- **子模組一律不得 import barrel**，否則形成 `barrel → 子模組 → barrel` 的環
+- **`conversationCreationJobRepository` 完整封裝在 `conversationCreationService.js`**，
+  service 層其他地方都不再碰它
+- **移除 `this._generateAIResponseAsync`**：改為直接呼叫模組內函式，
+  不再隱性依賴「barrel 是否把該方法合併進同一個物件」
+- **保留 barrel**：controller 的 16 處 `conversationService.X()` 呼叫**零修改**
+
+### 驗證結果
+
+- ✅ 82 則測試全綠，且**測試檔 zero diff**（拆檔前後斷言完全相同）
+- ✅ barrel 匯出 17 個方法，全部解析為 function（無循環依賴）
+- ✅ controller 零改動、`/health` 正常
+- ✅ 純搬移；唯一的邏輯調整是移除 `calculateHistoryLength` 已確認的死參數
+  `excludeLatestCount`（唯一呼叫點只傳 1 個引數，且呼叫端自己已先 slice 過）
+
+### 順帶修正：第二輪的區段註解貼錯位置
+
+第二輪加的 `// ========== 主角人設 ==========` 底下實際上還躺著
+`deleteMessageAndSubsequent` 和 `getMessageById` 兩個訊息網域的方法——因為它們的實體位置
+就在 `updateProtagonist` 之後。標籤與內容不符。拆檔後這些區段註解被真正的檔案邊界取代，
+問題自然消失。
+
+**教訓**：區段註解只是「假裝有邊界」，實際上不強制任何約束——方法位置一旦與標籤脫節就會說謊，
+而且沒有任何機制會提醒你。真正的檔案邊界則是編譯器層級的約束。
