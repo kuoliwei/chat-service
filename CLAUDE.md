@@ -19,20 +19,27 @@
 
 Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）+ Vitest（單元測試）
 
-**測試（2026-07-30 新增）**：`npm test`（= `vitest run`）。
-`src/services/conversationService.test.js` 有 82 則單元測試，覆蓋 service 層全部 17 個
-public 方法的 happy path 與各錯誤碼。測試不碰真實 DB／不發真實 HTTP——
-`conversationRepository.js`（4 個匯出物件）、`serviceClient.js`、`config/index.js`
-三個模組整模組 mock（`vi.mock` factory 模式，與 character-service 一致）。
+**測試（2026-07-30 新增）**：`npm test`（= `vitest run`），**共 150 則**：
+
+| 測試檔 | 則數 | 範圍 |
+|---|---|---|
+| `services/conversationService.test.js` | 82 | service 層 17 個 public 方法的 happy path 與各錯誤碼 |
+| `controllers/conversationController.test.js` | 41 | HTTP 回應契約（狀態碼、body、參數轉換），含各端點特有的錯誤語意差異 |
+| `repositories/conversationRepository.test.js` | 27 | 四個 repository 物件，含持久化／記憶體兩種模式的語意一致性與生成鎖協定 |
+
+測試不碰真實 DB／不發真實 HTTP，一律整模組 mock 下一層（`vi.mock` factory 模式，
+與 character-service 一致）；controller 測試用手刻的 req/res 假物件，不引入 supertest。
+
 ⚠️ **`config/index.js` 必須 mock**：`config.json` 未進版控（只有 `config.example.json`），
 真實模組讀不到檔案會 `process.exit(1)`。
-Controller、Repository 層仍無單元測試，路由層行為靠 `test.http` 手動整合測試。
+
+路由掛載本身（`app.js`）仍靠 `test.http` 手動整合測試。
 
 ## 分層結構
 
 ```
 src/
-├── controllers/conversationController.js  ← HTTP 層，共用 ERROR_MAP 把錯誤碼轉 HTTP 狀態碼
+├── controllers/conversationController.js  ← HTTP 層，共用 respondWithError 把錯誤碼轉 HTTP 狀態碼
 ├── services/                              ← 業務邏輯層（2026-07-30 依職責拆檔）
 │   ├── conversationService.js             ← barrel：重組成 17 方法物件供 controller 使用
 │   ├── conversationOwnership.js           ← 職責 6：擁有權檢查（共用葉節點）
@@ -43,7 +50,9 @@ src/
 │   ├── summaryService.js                  ← 職責 3：摘要機制
 │   ├── protagonistService.js              ← 職責 7：主角人設
 │   └── conversationService.test.js        ← 82 則單元測試（打 barrel 這層介面）
-├── repositories/conversationRepository.js ← 純 DB 操作（4 個 repository 物件）
+├── repositories/
+│   ├── conversationRepository.js          ← 純 DB 操作（conversation / message / creationJob）
+│   └── generationStatusRepository.js      ← AI 生成狀態＋並行鎖協定（不是 CRUD，見檔頭說明）
 ├── lib/serviceClient.js                   ← 對 ai-service／character-service 的 HTTP 呼叫
 ├── config/index.js                        ← 讀取 config.json（未進版控）
 └── app.js                                 ← Express 路由註冊
@@ -70,11 +79,14 @@ src/
 - 「重啟聊天室」已移除專用端點，前端改複用「刪除 + 建立」既有管線
 - 並行防護：同一聊天室已有 AI 生成任務進行中時拒絕新訊息（含殭屍鎖逾時保險）與拒絕刪除訊息
 - 集中的擁有權檢查 `assertConversationOwnership`（`conversationOwnership.js`）：所有以 `conversationId` 為主鍵的方法都先過這關，修正過去 4 處方法各自漏寫 userId 驗證的漏洞（跨帳號讀取/寫入）；支援 `{ isInternalRequest }` 選項——gateway 的 `/internal/conversations` 與 `/internal/conversations/:id/messages` 路由轉發過來的內部請求（`x-internal-request: true`）跳過 userId 擁有權比對，供 ai-service 查詢/寫入對話歷史
-- Controller 的錯誤碼→HTTP 映射改用共用 `ERROR_MAP` 查表（與 auth/user/character 三服務風格一致）；`sendMessage`（依 characterId）對話不存在時已統一為 404（原為 400，`simplify-chat-service` 唯一的可觀察行為變更）
+- Controller 的錯誤碼→HTTP 映射用共用 `ERROR_MAP` 查表，並於 2026-07-30 進一步抽出 `respondWithError()`（與 auth/user/character 三服務的 `respondError` 慣例一致）。它支援兩種端點級覆寫，處理「同一錯誤碼在不同端點語意不同」的情況：`overrides`（例如 `AI_GENERATION_IN_PROGRESS` 在發送與刪除端點的提示文字不同）與 `serviceErrorPrefix`（`SERVICE_ERROR` 帶 ai-service 的動態細節，各端點需說明「什麼沒被做掉」）。`sendMessage`（依 characterId）對話不存在時已統一為 404（原為 400，`simplify-chat-service` 唯一的可觀察行為變更）
+- **日誌慣例**（比照 character-service）：`respondWithError` 只在未命中 `ERROR_MAP` 的非預期例外（真正的 500）才印 `❌`，已知的語意錯誤（400/401/403/404/409）不重複印
 
 ### 已知限制
 
 - **大量除錯用 `console.log`**（含明顯的 `🐛 [DEBUG]` 前綴），散布在 controller 與 service 全層——`simplify-chat-service` change（2026-07-25）確認暫緩，非該輪範圍，目前仍未處理
+- **拆檔後的 log 前綴仍寫 `[conversationService]`**：service 層已拆成 7 個模組，但 log 前綴未跟著改（2026-07-30 拆檔時刻意維持「純搬移」）。若要改成各自的模組名，應為獨立變更
+- **`app.js` 的路由掛載無單元測試**：controller/service/repository 三層皆有，但「哪個路徑對到哪個 handler」仍只靠 `test.http` 手動驗證
 - `src/config/config.txt`：`config.json` 的說明文件（非程式碼），內容包含已知未使用的 `rag.topK`/`rag.threshold` 欄位，非本輪範圍
 - service 層各模組直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——JS 環境下屬約定俗成，確認不處理
 
@@ -152,7 +164,7 @@ src/
 
 ## 演進歷史（節錄自 git log）
 
-依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25）→ 依《微服務架構準則/實作spec》平台級稽核後修正（合併授權邏輯、刪除 `authMiddleware.js`、新增 `x-internal-request` 內部路由支援、`creationJobs`/`aiGenerationStatus` 記憶體 Map 全面改為 Prisma 持久化，commit `b509562`，2026-07-25～26，含重啟服務實測驗證）→ 程式碼層優化：JSDoc 補完 + 區段註解（commit `d84764f`，2026-07-30）→ 導入 Vitest + 82 則 service 層單元測試（commit `c829512`）→ 依《程式撰寫設計原則》職責清單把 1263 行的 `conversationService.js` 拆成 7 個模組 + barrel（commit `e85fce8`，測試 zero diff 驗證行為不變）
+依時間序：初始 CRUD → 服務間通訊（呼叫 character-service）→ RAG 整合生成 → 非同步 AI 回覆 + 前端輪詢 → 重啟對話最佳化 → 防止 `error.message` 外洩前端 → AI 生成狀態內存追蹤 + 刪除順序修正 + 摘要被動拋錯 → 訊息回溯刪除 + 摘要配對機制 + 主角人設 + 並行生成鎖 → 移除專用重啟管線 → 摘要機制重構 + 延長 AI timeout → 修正跨帳號授權漏洞 → 依《後端系統設計原則》稽核後以 change `simplify-chat-service` 清理（ERROR_MAP 查表化、刪除死代碼、移除多餘 CORS、統一 sendMessage 錯誤碼，2026-07-25）→ 依《微服務架構準則/實作spec》平台級稽核後修正（合併授權邏輯、刪除 `authMiddleware.js`、新增 `x-internal-request` 內部路由支援、`creationJobs`/`aiGenerationStatus` 記憶體 Map 全面改為 Prisma 持久化，commit `b509562`，2026-07-25～26，含重啟服務實測驗證）→ 程式碼層優化：JSDoc 補完 + 區段註解（commit `d84764f`，2026-07-30）→ 導入 Vitest + 82 則 service 層單元測試（commit `c829512`）→ 依《程式撰寫設計原則》職責清單把 1263 行的 `conversationService.js` 拆成 7 個模組 + barrel（commit `e85fce8`，測試 zero diff 驗證行為不變）→ 清除 AI Service 健檢的連鎖死代碼（commit `52e02ad`）→ 補 repository 層 27 則測試並把生成鎖協定抽成獨立檔（commits `b2f81dd`／`b09d7a8`）→ 補 controller 層 41 則測試並抽出 `respondWithError` 消除 16 處重複（commits `d0edc7d`／`8e9940c`）
 
 ## 現況補充
 

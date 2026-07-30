@@ -262,3 +262,71 @@ JSDoc（@param/@returns/@throws）的對象。
 
 **教訓**：區段註解只是「假裝有邊界」，實際上不強制任何約束——方法位置一旦與標籤脫節就會說謊，
 而且沒有任何機制會提醒你。真正的檔案邊界則是編譯器層級的約束。
+
+---
+
+## 2026-07-30 第四輪：service 層以外的其餘三層
+
+> 第三輪只處理了 service 層。使用者接著問「只有 service 是有需要拆的嗎」，
+> 於是把 controller / repository / lib 三層也量過一遍。結論：**只有一刀真的值得拆，
+> 一項是假議題，另外撿到一串連鎖死代碼。**
+
+### 各層評估結果
+
+| 檔案 | 行數 | 判定 |
+|---|---|---|
+| `conversationController.js` | 454 | **不是拆檔問題**——16 個方法都在做同一件事（HTTP 轉接），是單一職責。真正的問題是重複 |
+| `conversationRepository.js` | 398 | **有一刀值得**——4 個匯出物件中，`generationStatusRepository` 種類不同 |
+| `serviceClient.js` | 382 | 拆的理由最弱（9 成是 ai-service client），但**撿到 2 個死方法** |
+| `app.js` | 76 | 沒問題 |
+
+### A. 連鎖死代碼（commit `52e02ad`）
+
+`serviceClient.getUser` 零呼叫點；`checkAIServiceHealth` 只出現在兩段「實驗性註解」裡。
+順著這條線往下查，發現 **`AI_SERVICE_UNAVAILABLE` 只在那兩段註解掉的程式碼中拋出，
+但 controller 還留著 2 處活的處理器在等它**——那些分支從實驗停用的那天起就不可達。
+
+全部刪除。無行為變更：ai-service 不可用時錯誤仍循既有路徑傳播（建立流程 → job 標記 failed；
+訊息生成 → `_generateAIResponseAsync` 記成 failed 狀態）。前置健檢屬多餘往返，實驗結論就此定案。
+
+**教訓**：死代碼會結伴出現。刪一個方法時要往上游追「誰在等它的產物」，
+否則會留下一批看起來很合理、實際上永遠不會執行的錯誤處理分支。
+
+### B. 抽出生成鎖協定（commits `b2f81dd` + `b09d7a8`）
+
+`conversationRepository.js` 一檔塞了 4 個匯出物件。判斷結果不是「4 個都要拆」：
+
+- `conversationRepository` + `messageRepository` → **同一個 aggregate**（對話與其訊息），
+  依《程式撰寫設計原則.md》「2-3 個高度相關的職責可同檔」，不拆
+- `conversationCreationJobRepository` → 不同表，但就是單純 CRUD 且量小，不拆
+- `generationStatusRepository` → **它根本不是 repository**。`tryAcquireLock`／`releaseLock`
+  是並行控制協定，牽涉競態、殭屍鎖逾時、回合身分，且有兩種模式要維持語意一致。
+  **種類不同的東西不該混在一起** → 抽成 `generationStatusRepository.js`（183 行）
+
+抽檔前先補了 27 則 repository 測試，其中一則特別針對 `setFailed` 必須保留 `tempUserId`——
+程式碼註解原本寫著「而且沒有任何自動化測試會抓到（本服務零測試框架）」，這則測試補上了那個缺口。
+
+### C. controller 錯誤處理去重（commits `d0edc7d` + `8e9940c`）
+
+**調查發現先前的判斷是錯的**：原本以為「四個服務都有這個重複，要一起改」，
+實際查證後 **auth / user / character 三個服務早就各自抽好了共用錯誤函式**
+（`respondError` / `respondWithError`），**只有 chat-service 落後**。
+所以這不是引入新寫法，而是把 chat-service 補齊到平台既有慣例——增加一致性而非破壞。
+
+chat-service 比其他三個難的地方：有多處「同一錯誤碼、不同端點語意不同」，不能壓平成一張表。
+`respondWithError` 因此支援兩種端點級覆寫（`overrides` 與 `serviceErrorPrefix`），
+並把三組覆寫提升為具名常數，讓「這個端點哪裡不一樣」一眼可見。
+
+439 → 377 行，inline 的 `if (error.message...)` 判斷歸零。
+
+### 本輪測試累積
+
+| 層 | 則數 | commit |
+|---|---|---|
+| service | 82 | `c829512`（第三輪） |
+| repository | 27 | `b2f81dd` |
+| controller | 41 | `d0edc7d` |
+| **合計** | **150** | |
+
+每一次重構都遵循同一個紀律：**先補該層測試 → commit → 重構 → 用同一份未修改的斷言驗證**。
+三次重構的測試檔 diff 分別是：0 行、8 行（僅 import/mock 接線）、0 行。
