@@ -19,13 +19,14 @@
 
 Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）+ Vitest（單元測試）
 
-**測試（2026-07-30 新增）**：`npm test`（= `vitest run`），**共 150 則**：
+**測試（2026-07-30 新增）**：`npm test`（= `vitest run`），**共 152 則**：
 
 | 測試檔 | 則數 | 範圍 |
 |---|---|---|
 | `services/conversationService.test.js` | 82 | service 層 17 個 public 方法的 happy path 與各錯誤碼 |
 | `controllers/conversationController.test.js` | 41 | HTTP 回應契約（狀態碼、body、參數轉換），含各端點特有的錯誤語意差異 |
 | `repositories/conversationRepository.test.js` | 27 | 四個 repository 物件，含持久化／記憶體兩種模式的語意一致性與生成鎖協定 |
+| `app.test.js` | 2 | 路由掛載驗證（16 個 API 端點與 controller 方法的對應） |
 
 測試不碰真實 DB／不發真實 HTTP，一律整模組 mock 下一層（`vi.mock` factory 模式，
 與 character-service 一致）；controller 測試用手刻的 req/res 假物件，不引入 supertest。
@@ -55,7 +56,8 @@ src/
 │   └── generationStatusRepository.js      ← AI 生成狀態＋並行鎖協定（不是 CRUD，見檔頭說明）
 ├── lib/serviceClient.js                   ← 對 ai-service／character-service 的 HTTP 呼叫
 ├── config/index.js                        ← 讀取 config.json（未進版控）
-└── app.js                                 ← Express 路由註冊
+├── app.js                                 ← Express 路由註冊
+└── app.test.js                            ← 2 則路由掛載測試（新增 2026-07-30）
 ```
 
 **拆檔依據**：不是行數，而是根目錄《程式撰寫設計原則.md》第 50-57 行針對本檔列出的職責清單。
@@ -85,8 +87,6 @@ src/
 ### 已知限制
 
 - **大量除錯用 `console.log`**（含明顯的 `🐛 [DEBUG]` 前綴），散布在 controller 與 service 全層——`simplify-chat-service` change（2026-07-25）確認暫緩，非該輪範圍，目前仍未處理
-- **拆檔後的 log 前綴仍寫 `[conversationService]`**：service 層已拆成 7 個模組，但 log 前綴未跟著改（2026-07-30 拆檔時刻意維持「純搬移」）。若要改成各自的模組名，應為獨立變更
-- **`app.js` 的路由掛載無單元測試**：controller/service/repository 三層皆有，但「哪個路徑對到哪個 handler」仍只靠 `test.http` 手動驗證
 - `src/config/config.txt`：`config.json` 的說明文件（非程式碼），內容包含已知未使用的 `rag.topK`/`rag.threshold` 欄位，非本輪範圍
 - service 層各模組直接依賴具體 repository/serviceClient，非抽象介面（SOLID-DIP）——JS 環境下屬約定俗成，確認不處理
 
@@ -100,6 +100,8 @@ src/
 - ~~`prisma.config.ts`（已查證 Prisma 5.22 CLI 不讀取，確認為死代碼）~~ → 已刪除
 - ~~`cors()` 允許所有 origin~~ → 已移除（已 grep 前端 `persona-nexus-chat` 確認無啟用中直連路徑）
 - ~~`package.json` 的 `"test": "jest"`（斷掉的 script）~~ → 已移除
+- ~~拆檔後 service log 前綴仍寫 `[conversationService]`~~ → 2026-07-30 統一改為模組名（`[messageService]`, `[aiGenerationService]`, `[conversationCreationService]`, `[protagonistService]`, `[conversationCrudService]`, `[summaryService]`），共 23 處
+- ~~`app.js` 的路由掛載無單元測試~~ → 2026-07-30 新增 `app.test.js` 2 則測試驗證 16 個 API 路由與 controller 方法的對應
 
 ## API 端點
 
