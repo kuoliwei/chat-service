@@ -6,6 +6,8 @@ import { config } from '../config/index.js';
 // （原本是進程內記憶體 Map，服務重啟即遺失、多實例不共享，已改為 DB 欄位）。
 // config.persistence.enableGenerationStatus 可切換回記憶體版本（僅供本機測試，見 config.txt）。
 
+// ========== 私有 Helpers（摘要機制／RAG／擁有權檢查） ==========
+
 function generateConversationId() {
   return `conv_${Date.now()}`;
 }
@@ -362,6 +364,21 @@ async function _prepareAndCreateConversation(userId, characterId, character, con
 let requestCounter = 0;
 
 export const conversationService = {
+  // ========== 對話建立 ==========
+
+  /**
+   * 取得或建立與指定角色的對話（非同步 + 輪詢模式）
+   * 對話已存在時直接回傳 ready；不存在時發起背景建立流程（RAG 初始化）並回傳 preparing，
+   * 前端需輪詢本方法直到收到 ready 或 failed
+   * @param {string} userId - 使用者 ID
+   * @param {string} characterId - 角色 ID
+   * @returns {Promise<Object>} { status: 'ready', conversationId, messages, title, ... } |
+   *   { status: 'preparing' } | { status: 'failed', message }
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CHARACTER_ID' 若 characterId 缺失
+   * @throws {Error} 'CHARACTER_NOT_FOUND' 若角色不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該角色
+   */
   async getOrCreateConversation(userId, characterId) {
     // 🆕 為每個請求分配唯一 ID，用於追蹤並發請求
     const requestId = ++requestCounter;
@@ -476,6 +493,14 @@ export const conversationService = {
     return { status: 'preparing' };
   },
 
+  // ========== 對話查詢 ==========
+
+  /**
+   * 取得使用者的所有對話（含各對話最新一則訊息）
+   * @param {string} userId - 使用者 ID
+   * @returns {Promise<Array<Object>>} 對話列表，依 updatedAt 遞減排序
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   */
   async getAllConversations(userId) {
     validateUserId(userId);
 
@@ -493,6 +518,12 @@ export const conversationService = {
     return conversations;
   },
 
+  /**
+   * 取得使用者的所有對話摘要（輕量版，不含訊息內容，供列表頁快速載入）
+   * @param {string} userId - 使用者 ID
+   * @returns {Promise<Array<{conversationId, characterId, characterName, updatedAt}>>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   */
   async getConversationsSummary(userId) {
     validateUserId(userId);
 
@@ -511,6 +542,20 @@ export const conversationService = {
     }));
   },
 
+  // ========== 訊息 CRUD ==========
+
+  /**
+   * 同步發送訊息到某角色的最新對話（不觸發 AI 生成，僅單純保存訊息）
+   * @param {string} userId - 使用者 ID
+   * @param {string} characterId - 角色 ID
+   * @param {'user'|'assistant'} role - 訊息角色
+   * @param {string} text - 訊息內容
+   * @returns {Promise<{id, role, text, createdAt}>} 已保存的訊息
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_TEXT' 若 text 缺失
+   * @throws {Error} 'INVALID_ROLE' 若 role 不是 'user' 或 'assistant'
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若該角色尚無對話
+   */
   async sendMessage(userId, characterId, role, text) {
     validateUserId(userId);
 
@@ -552,7 +597,24 @@ export const conversationService = {
     };
   },
 
-  // 🆕 tempUserId（可選）：前端臨時訊息 ID，生成成功後放入狀態供前端配對替換
+  /**
+   * 非同步發送訊息到指定對話並觸發 AI 生成（立即回 accepted，背景生成回覆）
+   * 同一對話已有生成任務進行中時會拒絕（並行防護），成功時會先執行摘要機制（若達閾值）
+   * 再背景呼叫 AI 服務，結果透過 getAIGenerationStatus 輪詢取得
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @param {string} text - 使用者訊息內容
+   * @param {string} [tempUserId] - 前端臨時訊息 ID，生成完成後放入狀態供前端配對替換
+   * @param {Object} [options]
+   * @param {boolean} [options.isInternalRequest] - true 時跳過 userId 擁有權比對（供內部服務呼叫）
+   * @returns {Promise<{status: 'accepted', message: string}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失（非內部請求）
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   * @throws {Error} 'MISSING_TEXT' 若 text 缺失
+   * @throws {Error} 'AI_GENERATION_IN_PROGRESS' 若該對話已有生成任務進行中
+   */
   async sendMessageToConversation(userId, conversationId, text, tempUserId, { isInternalRequest } = {}) {
     // 先授權再驗輸入：無權存取這個聊天室的人，不該因為送出的內容格式不同
     // 而收到不一樣的回應（400 vs 403 的差異本身就是一種資訊）。
@@ -649,9 +711,15 @@ export const conversationService = {
     return response;
   },
 
-  // 異步生成 AI 回覆並創建訊息
-  // 🆕 【重大改動】同時保存用戶訊息 + AI 回覆（原子性）
-  // tempUserId（可選）：前端臨時訊息 ID，成功時放入狀態供前端配對
+  /**
+   * 背景生成 AI 回覆並原子性保存用戶訊息＋AI 訊息（由 sendMessageToConversation 呼叫，不對外暴露）
+   * 成功時同時寫入兩則訊息並將生成狀態設為 completed；失敗時兩則訊息都不保存，狀態設為 failed
+   * @param {Object} conversation - 對話物件
+   * @param {Array} allMessages - 已保存的未摘要訊息（不含本次用戶訊息）
+   * @param {string} userText - 本次使用者訊息內容
+   * @param {string} [tempUserId] - 前端臨時訊息 ID，供完成狀態配對
+   * @returns {Promise<void>} 不拋出異常，錯誤透過 generationStatusRepository.setFailed 記錄
+   */
   async _generateAIResponseAsync(conversation, allMessages, userText, tempUserId) {
     try {
       // 🆕 組裝包含新用戶訊息的對話列表（用於 AI 上下文）
@@ -713,6 +781,16 @@ export const conversationService = {
     }
   },
 
+  /**
+   * 依角色查詢訊息列表（舊方法，透過 characterId 找該用戶與該角色的對話）
+   * @param {string} userId - 使用者 ID
+   * @param {string} characterId - 角色 ID
+   * @param {number} [limit=50] - 回傳筆數上限
+   * @param {number} [offset=0] - 略過筆數
+   * @returns {Promise<Array<Object>>} 訊息陣列，依 createdAt 遞增排序
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若該角色尚無對話
+   */
   async getMessages(userId, characterId, limit = 50, offset = 0) {
     validateUserId(userId);
 
@@ -735,6 +813,20 @@ export const conversationService = {
     return messages.slice(offset, offset + limit);
   },
 
+  /**
+   * 依對話 ID 查詢訊息列表（新方法，供前端與內部服務／ai-service 呼叫）
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @param {number} [limit=50] - 回傳筆數上限
+   * @param {number} [offset=0] - 略過筆數
+   * @param {Object} [options]
+   * @param {boolean} [options.isInternalRequest] - true 時跳過 userId 擁有權比對
+   * @returns {Promise<Array<Object>>} 訊息陣列，依 createdAt 遞增排序
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失（非內部請求）
+   * @throws {Error} 'MISSING_CONVERSATION_ID' 若 conversationId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   */
   async getMessagesByConversationId(userId, conversationId, limit = 50, offset = 0, { isInternalRequest } = {}) {
     // 🔒 擁有權檢查：修正前這裡只確認 conversationId 存在，沒驗證是否屬於呼叫者，
     // 任何登入者帶任意 conversationId 都能讀到別人的完整對話內容。
@@ -759,6 +851,18 @@ export const conversationService = {
     return slicedMessages;
   },
 
+  // ========== 對話刪除 ==========
+
+  /**
+   * 刪除單一對話（含其所有訊息，Cascade）。先清理 RAG 資料，失敗則中斷、DB 不動
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @returns {Promise<{message: string}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   * @throws {Error} 'SERVICE_ERROR' 若 RAG 清理失敗（前綴，實際訊息由 ai-service 回傳）
+   */
   async deleteConversation(userId, conversationId) {
     // 查詢對話是否存在且屬於該用戶
     await assertConversationOwnership(userId, conversationId);
@@ -774,6 +878,16 @@ export const conversationService = {
     return { message: 'Conversation deleted successfully' };
   },
 
+  /**
+   * 刪除某使用者與某角色的所有對話。逐一清理各對話的 RAG 資料，任一失敗即中斷、DB 不動
+   * @param {string} userId - 使用者 ID
+   * @param {string} characterId - 角色 ID
+   * @returns {Promise<{message: string, deletedCount: number}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CHARACTER_ID' 若 characterId 缺失
+   * @throws {Error} 'NO_CONVERSATIONS_FOUND' 若該角色無任何對話
+   * @throws {Error} 'SERVICE_ERROR' 若任一對話的 RAG 清理失敗
+   */
   async deleteConversationsByCharacter(userId, characterId) {
     validateUserId(userId);
 
@@ -814,7 +928,17 @@ export const conversationService = {
   // 🆕 重啟聊天室已改由前端複用「刪除 + 建立」既有管線，
   // restartConversation / restartConversationById（不清 RAG、不初始化 RAG 的舊管線）已移除
 
-  // 🆕 【主角人設】讀取聊天室的主角名稱與背景
+  // ========== 主角人設 ==========
+
+  /**
+   * 讀取對話的主角（使用者扮演角色）名稱與背景
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @returns {Promise<{protagonistName: string|null, protagonistBackground: string|null}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   */
   async getProtagonist(userId, conversationId) {
     const conversation = await assertConversationOwnership(userId, conversationId);
 
@@ -824,8 +948,18 @@ export const conversationService = {
     };
   },
 
-  // 🆕 【主角人設】更新聊天室的主角名稱與背景
-  // 流程：先更新 RAG（背景切片，失敗拋錯中止）→ 成功後才寫 DB（與刪除的順序原則一致）
+  /**
+   * 更新對話的主角名稱與背景。先更新 RAG（背景切片，失敗拋錯中止），成功後才寫 DB
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @param {string} [protagonistName] - 主角名稱
+   * @param {string} [protagonistBackground] - 主角背景文本
+   * @returns {Promise<{protagonistName: string|null, protagonistBackground: string|null}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   * @throws {Error} 'SERVICE_ERROR' 若 RAG 更新失敗
+   */
   async updateProtagonist(userId, conversationId, protagonistName, protagonistBackground) {
     await assertConversationOwnership(userId, conversationId);
 
@@ -850,8 +984,22 @@ export const conversationService = {
     };
   },
 
-  // 🆕 【刪除訊息】刪除指定的用戶訊息及其後所有訊息（回溯式刪除）
-  // 語義：對話裁剪回該訊息發出之前的狀態，之後的用戶訊息與 AI 回覆全部刪除
+  /**
+   * 回溯式刪除：刪除指定用戶訊息及其後所有訊息，對話裁剪回該訊息發出之前的狀態
+   * 若刪除範圍涉及已摘要的訊息，連帶刪除對應 Qdrant 摘要，並將刪除點之前、被同一摘要
+   * 涵蓋的訊息標回未摘要
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @param {string} messageId - 要刪除的目標訊息 ID（必須是 role='user' 的訊息）
+   * @returns {Promise<{deletedCount: number, deletedIds: string[]}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_PARAMS' 若 conversationId 或 messageId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   * @throws {Error} 'AI_GENERATION_IN_PROGRESS' 若該對話正在生成 AI 回覆
+   * @throws {Error} 'MESSAGE_NOT_FOUND' 若目標訊息不存在
+   * @throws {Error} 'NOT_USER_MESSAGE' 若目標訊息不是使用者訊息
+   */
   async deleteMessageAndSubsequent(userId, conversationId, messageId) {
     // 缺 userId 一律先回 UNAUTHORIZED，維持與其他方法一致的錯誤優先序。
     validateUserId(userId);
@@ -968,7 +1116,18 @@ export const conversationService = {
     };
   },
 
-  // 🆕 查詢單一訊息（用於前端輪詢 AI 完成狀態）
+  /**
+   * 查詢單一訊息（供前端輪詢 AI 生成完成後配對真實訊息）
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @param {string} messageId - 訊息 ID
+   * @returns {Promise<{id, role, text, status, createdAt, updatedAt}>}
+   * @throws {Error} 'MISSING_PARAMS' 若 conversationId 或 messageId 缺失
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   * @throws {Error} 'MESSAGE_NOT_FOUND' 若訊息不存在
+   */
   async getMessageById(userId, conversationId, messageId) {
     if (!conversationId || !messageId) {
       throw new Error('MISSING_PARAMS');
@@ -997,7 +1156,18 @@ export const conversationService = {
     };
   },
 
-  // 🆕 清除失敗的 job，讓使用者重試建立聊天室
+  // ========== 建立重試 ==========
+
+  /**
+   * 清除失敗的建立 job，讓使用者可以重新發起建立聊天室
+   * @param {string} userId - 使用者 ID
+   * @param {string} characterId - 角色 ID
+   * @returns {Promise<{success: true, message: string}>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'MISSING_CHARACTER_ID' 若 characterId 缺失
+   * @throws {Error} 'NO_FAILED_JOB' 若找不到對應的建立 job
+   * @throws {Error} 'JOB_NOT_FAILED' 若該 job 狀態不是 failed
+   */
   async retryConversationCreation(userId, characterId) {
     validateUserId(userId);
 
@@ -1027,9 +1197,20 @@ export const conversationService = {
     };
   },
 
-  // 🆕 查詢 AI 生成狀態（成功、失敗、生成中）
-  // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能查詢別人聊天室的
-  // AI 生成狀態（改成 async 是因為擁有權檢查需要查一次資料庫）。
+  // ========== AI 生成狀態 ==========
+
+  /**
+   * 查詢對話目前的 AI 生成狀態（供前端輪詢用）
+   * 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能查詢別人對話的
+   * AI 生成狀態（改成 async 是因為擁有權檢查需要查一次資料庫）。
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @returns {Promise<Object>} { status: 'generating'|'completed'|'failed'|'unknown', error?,
+   *   tempUserId?, userMessageId?, assistantMessageId?, timestamp? }
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   */
   async getAIGenerationStatus(userId, conversationId) {
     const conversation = await assertConversationOwnership(userId, conversationId);
     const genStatus = generationStatusRepository.get(conversation);
@@ -1054,9 +1235,17 @@ export const conversationService = {
     };
   },
 
-  // 🆕 清除 AI 生成狀態（用戶重試或其他操作後）
-  // 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能清除別人聊天室的
-  // AI 生成狀態記錄（改成 async 是因為擁有權檢查需要查一次資料庫）。
+  /**
+   * 清除對話的 AI 生成狀態記錄（用戶重試或其他操作後呼叫，避免殘留舊狀態）
+   * 🔒 擁有權檢查：修正前只認 conversationId，任何登入者都能清除別人對話的
+   * AI 生成狀態記錄（改成 async 是因為擁有權檢查需要查一次資料庫）。
+   * @param {string} userId - 使用者 ID
+   * @param {string} conversationId - 對話 ID
+   * @returns {Promise<void>}
+   * @throws {Error} 'UNAUTHORIZED' 若 userId 缺失
+   * @throws {Error} 'CONVERSATION_NOT_FOUND' 若對話不存在
+   * @throws {Error} 'FORBIDDEN' 若無權限存取該對話
+   */
   async clearAIGenerationStatus(userId, conversationId) {
     const conversation = await assertConversationOwnership(userId, conversationId);
     const genStatus = generationStatusRepository.get(conversation);

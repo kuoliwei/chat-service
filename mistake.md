@@ -117,3 +117,73 @@
   `prisma migrate`/`prisma studio` 等指令失效）。建議列入 Phase 6 任務時先查證再決定刪除或保留。
 - **第 1、3 點與其他三服務的模式一致**：這兩點的優化方式在 auth/user/character 三服務已有先例可循，
   風險相對較低；第 4、6 點是本服務獨有的新問題，建議優先處理有先例的項目，新問題視使用者意願決定範圍。
+
+---
+
+## 2026-07-30 追加稽核：程式碼層面優化（第二輪）
+
+> **這是什麼**：上方是 2026-07-25 的架構層級稽核（SOLID/DRY/12-Factor），已全數處理完畢。
+> 本節是對齊 auth-service / user-service / character-service 三個服務已完成的**程式碼層面**
+> 優化（JSDoc、區段註解、命名），依《程式撰寫設計原則.md》六大維度重新掃描。
+> 兩輪稽核角度不同，互不重複。
+
+### 稽核範圍
+
+| 檔案 | 行數 | 備註 |
+|------|------|------|
+| `src/services/conversationService.js` | 1069 | 主要問題來源 |
+| `src/controllers/conversationController.js` | 454 | ERROR_MAP 已集中化，品質良好 |
+| `src/repositories/conversationRepository.js` | 322 | 含 4 個 repository |
+| `src/lib/serviceClient.js` | 382 | JSDoc 已完整，**免修改** |
+| `src/app.js` / `src/config/index.js` | 76 / 19 | **免修改** |
+
+### 🔴 高優先度
+
+**1. `conversationService.js` 1069 行，遠超 800 行警戒線，職責混雜且無區段分割（A1/A2 違反）**
+
+檔案內至少 7 個職責平鋪在一起，無任何 `// ========== ==========` 區段註解分隔：
+對話建立、對話查詢/列表、訊息 CRUD、對話刪除、主角人設、建立重試、AI 生成狀態查詢/清除；
+加上摘要機制、RAG 清理、AI 請求組裝、擁有權檢查等共用 helper。
+
+這與上方 2026-07-25 稽核「SOLID-SRP：⚠️ 輕微（低把握），建議列為觀察項而非強制處理」的結論
+一致——本輪維持「不拆檔，僅補區段註解緩解導航成本」的判斷（見下方「拆檔決策」）。
+
+**2. 匯出的 17 個 public 方法幾乎全數缺少 JSDoc，本末倒置（F2/B3 違反）**
+
+檔案內私有 helper（`assertConversationOwnership`、`calculateHistoryLength`、
+`checkIfNeedsSummary`、`buildAIServiceRequest`、`cleanupConversationRAG`、`executeSummary`）
+都有完整 JSDoc，但 `conversationService` 物件底下 17 個 public 方法——controller 實際呼叫的
+API 介面——只有 3 個帶簡短行內註解，其餘完全沒有 JSDoc。依前三服務標準，這些才是最需要
+JSDoc（@param/@returns/@throws）的對象。
+
+### 🟡 中優先度
+
+**3. `conversationRepository.js` 的基礎 CRUD 方法缺少 JSDoc**
+
+`conversationRepository`（6 方法）與 `messageRepository`（7 方法）共 13 個方法皆無 JSDoc，
+對齊前三服務的 userRepository/characterRepository 標準應補上。
+`conversationCreationJobRepository`、`generationStatusRepository` 已有優質行內註解說明設計
+動機，但缺正式 JSDoc 格式。
+
+### 🟢 低優先度 / 維持不動
+
+- `assertConversationOwnership`、`tryAcquireLock`、`setFailed` 上方的長段落註解（說明歷史
+  bug、回合身分設計、殭屍鎖邏輯）屬高品質「為什麼」型註解，**不應簡化**，予以保留。
+- `conversationController.js` 的 try/catch/ERROR_MAP 樣板重複，但與其他三服務既有 controller
+  風格一致，不在本輪處理範圍。
+
+### 📋 已知限制（不在本輪處理範圍）
+
+- console.log 除錯訊息氾濫——已於 2026-07-25 輪確認暫緩。
+- SOLID-DIP（service 直接依賴具體 repository）——已於 2026-07-25 輪確認不處理。
+
+### 拆檔決策：本輪不拆 `conversationService.js`
+
+**理由**：
+1. 本服務無測試框架，拆檔若打斷共用狀態（`generationStatusRepository`、
+   `assertConversationOwnership` 跨方法共用）沒有自動化網可攔截回歸
+2. 2026-07-25 輪 SOLID-SRP 判定已是「低把握、建議列為觀察項」，非明確缺陷
+3. 前三服務的優化範圍皆為「補文件、簡化註解」，不涉及拆檔，維持一致慣例
+
+**緩解方案**：補 JSDoc + 區段註解（`// ========== 職責 X ==========`），達成 A2（內部結構
+清晰性），將拆檔列為未來獨立工作項（需先補測試才能安全進行）。
