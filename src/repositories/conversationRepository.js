@@ -173,38 +173,22 @@ export const messageRepository = {
   },
 };
 
-// 聊天室建立流程的狀態追蹤（原本是進程內記憶體 Map `creationJobs`，改為持久化）。
-// config.persistence.enableCreationJobs === false 時改回進程內記憶體 Map（僅供本機測試，
-// 服務重啟即遺失所有 job 狀態，不要在正式環境關閉——見 config.txt 說明）。
-const memoryJobs = new Map();
-const jobKey = (userId, characterId) => `${userId}:${characterId}`;
+// 聊天室建立流程的狀態追蹤。DB 版持久化在 ConversationCreationJob 表，服務重啟不遺失；
+// 記憶體版退回進程內 Map（原始舊版行為），服務重啟即遺失所有 job 狀態，僅供本機測試
+// ——config.persistence.enableCreationJobs === false 時啟用，見 config.txt 說明。
+//
+// 兩種模式拆成獨立物件（dbCreationJobRepository / memoryCreationJobRepository），
+// 選擇只在檔案底部發生一次（模組載入時決定），不再是每個方法各自寫一份
+// if (!config.persistence...) 分支——理由與同層的 generationStatusRepository.js 一致。
 
-export const conversationCreationJobRepository = {
+const dbCreationJobRepository = {
   async findByKey(userId, characterId) {
-    if (!config.persistence?.enableCreationJobs) {
-      return memoryJobs.get(jobKey(userId, characterId)) || null;
-    }
     return await prisma.conversationCreationJob.findUnique({
       where: { userId_characterId: { userId, characterId } },
     });
   },
 
   async upsert(userId, characterId, data) {
-    if (!config.persistence?.enableCreationJobs) {
-      const key = jobKey(userId, characterId);
-      const now = new Date();
-      const existing = memoryJobs.get(key);
-      const record = {
-        userId,
-        characterId,
-        createdAt: existing?.createdAt || now,
-        ...existing,
-        ...data,
-        updatedAt: now,
-      };
-      memoryJobs.set(key, record);
-      return record;
-    }
     return await prisma.conversationCreationJob.upsert({
       where: { userId_characterId: { userId, characterId } },
       create: { userId, characterId, ...data },
@@ -213,13 +197,47 @@ export const conversationCreationJobRepository = {
   },
 
   async delete(userId, characterId) {
-    if (!config.persistence?.enableCreationJobs) {
-      const existed = memoryJobs.delete(jobKey(userId, characterId));
-      return { count: existed ? 1 : 0 };
-    }
     // 目標紀錄可能已不存在（例如重複清除），用 deleteMany 避免 P2025 例外
     return await prisma.conversationCreationJob.deleteMany({
       where: { userId, characterId },
     });
   },
 };
+
+const memoryJobs = new Map();
+const jobKey = (userId, characterId) => `${userId}:${characterId}`;
+
+const memoryCreationJobRepository = {
+  async findByKey(userId, characterId) {
+    return memoryJobs.get(jobKey(userId, characterId)) || null;
+  },
+
+  async upsert(userId, characterId, data) {
+    const key = jobKey(userId, characterId);
+    const now = new Date();
+    const existing = memoryJobs.get(key);
+    const record = {
+      userId,
+      characterId,
+      createdAt: existing?.createdAt || now,
+      ...existing,
+      ...data,
+      updatedAt: now,
+    };
+    memoryJobs.set(key, record);
+    return record;
+  },
+
+  async delete(userId, characterId) {
+    const existed = memoryJobs.delete(jobKey(userId, characterId));
+    return { count: existed ? 1 : 0 };
+  },
+};
+
+export const conversationCreationJobRepository = config.persistence?.enableCreationJobs
+  ? dbCreationJobRepository
+  : memoryCreationJobRepository;
+
+// 供測試直接指定模式驗證兩套實作各自的行為，不需要透過 config 開關動態切換
+// （見 conversationRepository.test.js）。
+export { dbCreationJobRepository, memoryCreationJobRepository };

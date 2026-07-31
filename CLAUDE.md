@@ -25,7 +25,7 @@ Node.js + Express 5 + Prisma（SQLite）+ axios（服務間呼叫）+ Vitest（�
 |---|---|---|
 | `services/conversationService.test.js` | 82 | service 層 17 個 public 方法的 happy path 與各錯誤碼 |
 | `controllers/conversationController.test.js` | 41 | HTTP 回應契約（狀態碼、body、參數轉換），含各端點特有的錯誤語意差異 |
-| `repositories/conversationRepository.test.js` | 27 | 四個 repository 物件，含持久化／記憶體兩種模式的語意一致性與生成鎖協定 |
+| `repositories/conversationRepository.test.js` | 27 | 四個 repository 物件，含 DB／記憶體兩套獨立實作的語意一致性與生成鎖協定 |
 | `app.test.js` | 2 | 路由掛載驗證（16 個 API 端點與 controller 方法的對應） |
 
 測試不碰真實 DB／不發真實 HTTP，一律整模組 mock 下一層（`vi.mock` factory 模式，
@@ -73,7 +73,9 @@ src/
 - Express 5 + Prisma ORM + SQLite，雙資料模型：Conversation（含角色/主角快照欄位）+ Message
 - 聊天室建立採**非同步 + 輪詢**：`getOrCreateConversation` 先回 `202 preparing`，背景任務 `_prepareAndCreateConversation` 發起 RAG 初始化並輪詢其狀態，完成才寫 DB；建立中/失敗狀態持久化在 `ConversationCreationJob` 表（`userId`+`characterId` 為主鍵），非記憶體 Map，服務重啟不遺失
 - 發送訊息也是**非同步**：`sendMessageToConversation` 立即回 `201 accepted`，背景 `_generateAIResponseAsync` 呼叫 ai-service 生成回覆，成功才**原子性**存用戶訊息＋AI 回覆；生成中/完成/失敗狀態持久化在 `Conversation` 表的 `generationStatus`/`generationError`/`generationTempUserId`/`generationUserMessageId`/`generationAssistantMessageId`/`generationUpdatedAt` 欄位（透過 `conversationRepository` 讀寫），非記憶體 Map，供前端輪詢；服務重啟後仍可正確恢復（2026-07-26 已透過重啟服務實測驗證，見 K1-K5）
-- **2026-07-27 新增｜持久化可透過 config 切換回記憶體版本（僅供本機測試）**：`config.json` 的 `persistence.enableCreationJobs`／`persistence.enableGenerationStatus` 兩個旗標（預設皆為 `true`，行為與上述兩點一致）。設為 `false` 時，`conversationCreationJobRepository`／`generationStatusRepository`（`src/repositories/conversationRepository.js`）改用進程內記憶體 Map，等同持久化之前的舊版行為——服務重啟狀態立即消失，不需要再等殭屍鎖逾時（`generateResponse` timeout + 30 秒）。動機：手動測試時常需要中途重啟 chat-service（例如驗證其他服務的斷線恢復），持久化開啟時，中斷的 job／生成鎖會殘留在 DB 裡卡住後續操作。兩個旗標各自獨立生效，`get`/`tryAcquireLock`/`releaseLock`/`setCompleted`/`setFailed`/`reset` 等方法的行為在兩種模式下經測試腳本驗證完全一致（14/14 通過）。**不要在正式環境關閉**——關閉後服務重啟會遺失所有進行中/剛完成的狀態，前端輪詢配對會查無記錄。`config.json` 本身有進版控，關閉這兩個旗標屬本機暫時測試設定，不應 commit。
+- **2026-07-27 新增｜持久化可透過 config 切換回記憶體版本（僅供本機測試）**：`config.json` 的 `persistence.enableCreationJobs`／`persistence.enableGenerationStatus` 兩個旗標（預設皆為 `true`，行為與上述兩點一致）。設為 `false` 時，`conversationCreationJobRepository`／`generationStatusRepository` 改用進程內記憶體 Map，等同持久化之前的舊版行為——服務重啟狀態立即消失，不需要再等殭屍鎖逾時（`generateResponse` timeout + 30 秒）。動機：手動測試時常需要中途重啟 chat-service（例如驗證其他服務的斷線恢復），持久化開啟時，中斷的 job／生成鎖會殘留在 DB 裡卡住後續操作。**不要在正式環境關閉**——關閉後服務重啟會遺失所有進行中/剛完成的狀態，前端輪詢配對會查無記錄。`config.json` 本身有進版控，關閉這兩個旗標屬本機暫時測試設定，不應 commit。
+  - ⚠️ **2026-07-31 實測驗證的一種可能症狀（非使用者實際個案的確認根因）**：關閉 `enableGenerationStatus` 後，若在「AI 回覆剛生成完成、訊息已存入 DB」與「前端下一次輪詢」之間的一兩秒窗口重啟 chat-service，記憶體中的 `completed` 狀態會隨重啟消失，之後所有輪詢永遠回 `{"status":"unknown"}`（見 `aiResponsePoller.js`——`unknown` 不會被判定為失敗，也不會停止輪詢），前端會靜靜等到 120 次輪詢上限才 fallback 顯示通用的「回應失敗，請重試」——訊息其實已經成功，只有重新整理頁面才會看到真正的回覆。用直接控制時序的方式（監看 log 抓到 `completed` 那一刻立刻重啟）100% 可重現此類症狀；同時序在 `enableGenerationStatus: true`（DB 模式）下不受影響。**這證明了「重啟時序」是這一類症狀的其中一種可能成因，但使用者實際回報的個案已確認並未重啟任何服務**，也在完全正常使用（不重啟、不連續發送）下重測 6 輪未能重現——真正根因仍待釐清，見 chat-persistence-mode-refactor 這個 change 的 `tasks.md` 第 6 節與長期記憶 `chat-persistence-mode-refactor.md`。
+- **2026-07-31 重構｜開關機制改為兩套獨立實作，選擇只在模組載入時發生一次**：原本 `get`/`tryAcquireLock`/`releaseLock`/`setCompleted`/`setFailed`/`reset`/`findByKey`/`upsert`/`delete` 等每個方法內部都各自寫一份 `if (!config.persistence?.enableXXX) { ...記憶體版... } ...DB版...` 分支，DB 邏輯與記憶體邏輯交纏在同一段函式裡，兩套邏輯得靠人工同步維護一致（[[turn-identity-race-condition-fix]] 那次「兩個分支各自漏寫同一個欄位清空邏輯」就是代價）。改為 `dbGenerationStatusRepository`／`memoryGenerationStatusRepository`（`generationStatusRepository.js`）與 `dbCreationJobRepository`／`memoryCreationJobRepository`（`conversationRepository.js`）四個完整獨立的物件，各自匯出供測試直接指定驗證；`config.persistence.enableXXX` 只在檔案底部做一次三元選擇決定要匯出哪一個當作 `generationStatusRepository`／`conversationCreationJobRepository`（呼叫方 import 的名稱不變，行為與切換時機不變——本來就要重啟服務才生效）。`conversationRepository.test.js` 27 則測試同步改為直接匯入 `db*`/`memory*` 兩個具名實作測試，不再靠動態改寫 config 旗標切換模式；重構後 152 則測試全數通過（zero diff）。
 - 摘要機制：未摘要訊息字數達閾值（`config.summary.threshold`）時，先摘要較舊訊息（呼叫 ai-service 生成摘要 + 存入 Qdrant），標記 `summarized`/`summaryId`，短期記憶只留最新 N 條（`shortTermLimit`）
 - 訊息回溯刪除（`deleteMessageAndSubsequent`）：刪除某則用戶訊息會連帶刪除其後所有訊息；若刪除範圍涉及已摘要訊息，會連動刪除對應 Qdrant 摘要，並把刪除點之前、被同一摘要涵蓋的訊息標回未摘要
 - 對話刪除 / 依角色刪除對話：**先清 RAG（失敗即中斷、DB 不動）→ 成功才刪 DB**
@@ -102,6 +104,7 @@ src/
 - ~~`package.json` 的 `"test": "jest"`（斷掉的 script）~~ → 已移除
 - ~~拆檔後 service log 前綴仍寫 `[conversationService]`~~ → 2026-07-30 統一改為模組名（`[messageService]`, `[aiGenerationService]`, `[conversationCreationService]`, `[protagonistService]`, `[conversationCrudService]`, `[summaryService]`），共 23 處
 - ~~`app.js` 的路由掛載無單元測試~~ → 2026-07-30 新增 `app.test.js` 2 則測試驗證 16 個 API 路由與 controller 方法的對應
+- ~~`generationStatusRepository`／`conversationCreationJobRepository` 的 DB／記憶體兩種模式，靠每個方法內部各自寫 `if (!config.persistence?.enableXXX)` 分支切換，兩套邏輯交纏在同一段函式裡，得靠人工同步維護一致~~ → 2026-07-31 拆成四個完全獨立的具名實作（`db*`／`memory*`），`config.persistence.enableXXX` 只在模組載入時選一次，呼叫方 import 的名稱與行為不變，152 則測試 zero diff
 
 ## API 端點
 

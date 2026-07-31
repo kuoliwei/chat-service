@@ -10,21 +10,22 @@ import { conversationRepository } from './conversationRepository.js';
 // 種類不同的東西不該混在一起，這裡的每一行都需要被當成鎖來讀，而不是當成查詢。
 //
 // 狀態存在 Conversation 表的 generationStatus 等 6 個欄位，`generating` 同時兼作鎖。
-// config.persistence.enableGenerationStatus === false 時改回進程內記憶體 Map（等同
+// config.persistence.enableGenerationStatus === false 時改用進程內記憶體 Map（等同
 // 持久化之前的舊版行為），僅供本機測試，服務重啟即遺失所有生成中/剛完成的狀態，
 // 不要在正式環境關閉——見 config.txt 說明。
-const memoryGenerationStatus = new Map();
+//
+// 兩種模式各自完整封裝成獨立物件（dbGenerationStatusRepository /
+// memoryGenerationStatusRepository），選擇只在檔案最底部發生一次（模組載入時決定，
+// 與 config.json 本來就要重啟服務才能生效的時機一致）。原本每個方法內部都要手動維護
+// 一份 if (!config.persistence...) 分支，DB 版與記憶體版邏輯交纏在同一段函式裡，容易
+// 顧此失彼（tryAcquireLock 曾經兩個分支各自漏寫同一個欄位清空邏輯，見
+// turn-identity-race-condition 修正記錄）；拆開後兩份實作互不干擾，各自讀起來就是
+// 單純的「一種模式」。
 
-export const generationStatusRepository = {
-  // 讀取目前的生成狀態。enabled 時直接從已抓到的 conversation 物件取欄位（不額外查詢），
-  // disabled 時從記憶體 Map 讀。回傳 null 代表目前沒有生成狀態記錄。
+const dbGenerationStatusRepository = {
+  // 直接從已抓到的 conversation 物件取欄位，不額外查詢。
+  // 回傳 null 代表目前沒有生成狀態記錄。
   get(conversation) {
-    if (!config.persistence?.enableGenerationStatus) {
-      const record = memoryGenerationStatus.get(conversation.id);
-      // status 欄位為空即視為「沒有生成狀態記錄」，與 DB 分支的判斷規則一致
-      // （releaseLock/reset 會把 status 設回 null 但不刪除整筆記錄，靠這裡統一收斂語意）
-      return record?.status ? record : null;
-    }
     if (!conversation.generationStatus) {
       return null;
     }
@@ -38,11 +39,8 @@ export const generationStatusRepository = {
     };
   },
 
-  // 原子性搶鎖：目前沒有生成中、或生成中但已超過殭屍鎖時限 → 上鎖並回傳 true；
-  // 否則回傳 false（別人正持有有效的鎖）。
-  // enabled 時用 DB updateMany 的 where 條件做「檢查後更新」保證原子性；
-  // disabled 時利用 Node 單執行緒特性，同步檢查後立刻寫入 Map，中間不 await，
-  // 天然不會被其他請求插隊（與持久化之前的舊版邏輯相同）。
+  // 原子性搶鎖：用 DB updateMany 的 where 條件做「檢查後更新」——目前沒有生成中、
+  // 或生成中但已超過殭屍鎖時限 → 上鎖並回傳 true；否則回傳 false（別人正持有有效的鎖）。
   //
   // 🔑 【回合身分】上鎖 = 「本回合開始」的唯一原子性時間點，因此這裡必須順手做兩件事：
   //   1. 寫入本回合的 tempUserId（前端樂觀更新的臨時訊息 ID）
@@ -53,27 +51,6 @@ export const generationStatusRepository = {
   // 換成上一回合的舊訊息並停止輪詢——畫面上兩個氣泡一閃消失。
   // 搶鎖失敗時不得修改任何欄位（否則會污染別人正在進行的回合）。
   async tryAcquireLock(conversationId, staleLimitMs, { tempUserId } = {}) {
-    if (!config.persistence?.enableGenerationStatus) {
-      const existing = memoryGenerationStatus.get(conversationId);
-      if (existing && existing.status === 'generating') {
-        const lockAgeMs = Date.now() - (existing.updatedAt?.getTime() || 0);
-        if (lockAgeMs < staleLimitMs) {
-          return false;
-        }
-        console.warn(`⚠️  [generationStatusRepository] 偵測到殭屍鎖: 聊天室 ${conversationId} 的 generating 狀態已掛 ${Math.round(lockAgeMs / 1000)} 秒，視為失效並放行`);
-      }
-      // 整筆覆寫（不 spread existing）：與 DB 分支一樣達成「清空上一回合訊息 ID」的效果
-      memoryGenerationStatus.set(conversationId, {
-        status: 'generating',
-        error: null,
-        tempUserId: tempUserId || null,
-        userMessageId: null,
-        assistantMessageId: null,
-        updatedAt: new Date(),
-      });
-      return true;
-    }
-
     const staleBeforeTimestamp = new Date(Date.now() - staleLimitMs);
     const result = await prisma.conversation.updateMany({
       where: {
@@ -99,28 +76,10 @@ export const generationStatusRepository = {
   // 釋放鎖（只清 generationStatus，不動其他欄位）——用於上鎖後、進入背景生成前，
   // 前置流程失敗時的緊急解鎖。
   async releaseLock(conversationId) {
-    if (!config.persistence?.enableGenerationStatus) {
-      const existing = memoryGenerationStatus.get(conversationId);
-      if (existing) {
-        memoryGenerationStatus.set(conversationId, { ...existing, status: null });
-      }
-      return;
-    }
     await conversationRepository.update(conversationId, { generationStatus: null });
   },
 
   async setCompleted(conversationId, { tempUserId, userMessageId, assistantMessageId }) {
-    if (!config.persistence?.enableGenerationStatus) {
-      memoryGenerationStatus.set(conversationId, {
-        status: 'completed',
-        error: null,
-        tempUserId: tempUserId || null,
-        userMessageId,
-        assistantMessageId,
-        updatedAt: new Date(),
-      });
-      return;
-    }
     await conversationRepository.update(conversationId, {
       generationStatus: 'completed',
       generationError: null,
@@ -135,18 +94,7 @@ export const generationStatusRepository = {
   // setFailed 必須原封保留它——前端靠這個欄位判斷「這個 failed 屬於哪一回合」，
   // 才能立刻把佔位符換成失敗氣泡。若為了「清乾淨」而在這裡把它設成 null，
   // 前端的回合守門會擋掉真實失敗，使用者要等滿 120 秒輪詢超時才看得到失敗訊息。
-  // （2026-07-30 已補上對應的單元測試守住這個行為，見 conversationRepository.test.js）
   async setFailed(conversationId, errorMessage) {
-    if (!config.persistence?.enableGenerationStatus) {
-      const existing = memoryGenerationStatus.get(conversationId) || {};
-      memoryGenerationStatus.set(conversationId, {
-        ...existing,
-        status: 'failed',
-        error: errorMessage,
-        updatedAt: new Date(),
-      });
-      return;
-    }
     await conversationRepository.update(conversationId, {
       generationStatus: 'failed',
       generationError: errorMessage,
@@ -155,23 +103,8 @@ export const generationStatusRepository = {
   },
 
   // 完整重置（清 status/error/tempUserId/userMessageId/assistantMessageId，
-  // 保留 updatedAt——與原本兩處呼叫點的欄位範圍一致）。
-  // 用於：訊息回溯刪除後清除舊生成狀態、使用者主動清除生成狀態。
+  // 保留 updatedAt）。用於：訊息回溯刪除後清除舊生成狀態、使用者主動清除生成狀態。
   async reset(conversationId) {
-    if (!config.persistence?.enableGenerationStatus) {
-      const existing = memoryGenerationStatus.get(conversationId);
-      if (existing) {
-        memoryGenerationStatus.set(conversationId, {
-          ...existing,
-          status: null,
-          error: null,
-          tempUserId: null,
-          userMessageId: null,
-          assistantMessageId: null,
-        });
-      }
-      return;
-    }
     await conversationRepository.update(conversationId, {
       generationStatus: null,
       generationError: null,
@@ -181,3 +114,88 @@ export const generationStatusRepository = {
     });
   },
 };
+
+const memoryGenerationStatus = new Map();
+
+const memoryGenerationStatusRepository = {
+  // status 欄位為空即視為「沒有生成狀態記錄」，與 DB 版的判斷規則一致
+  // （releaseLock/reset 會把 status 設回 null 但不刪除整筆記錄，靠這裡統一收斂語意）。
+  get(conversation) {
+    const record = memoryGenerationStatus.get(conversation.id);
+    return record?.status ? record : null;
+  },
+
+  // 利用 Node 單執行緒特性，同步檢查後立刻寫入 Map，中間不 await，天然不會被其他
+  // 請求插隊（與持久化之前的舊版邏輯相同）。回合身分規則與 DB 版一致，見上方說明。
+  async tryAcquireLock(conversationId, staleLimitMs, { tempUserId } = {}) {
+    const existing = memoryGenerationStatus.get(conversationId);
+    if (existing && existing.status === 'generating') {
+      const lockAgeMs = Date.now() - (existing.updatedAt?.getTime() || 0);
+      if (lockAgeMs < staleLimitMs) {
+        return false;
+      }
+      console.warn(`⚠️  [generationStatusRepository] 偵測到殭屍鎖: 聊天室 ${conversationId} 的 generating 狀態已掛 ${Math.round(lockAgeMs / 1000)} 秒，視為失效並放行`);
+    }
+    // 整筆覆寫（不 spread existing）：與 DB 版一樣達成「清空上一回合訊息 ID」的效果
+    memoryGenerationStatus.set(conversationId, {
+      status: 'generating',
+      error: null,
+      tempUserId: tempUserId || null,
+      userMessageId: null,
+      assistantMessageId: null,
+      updatedAt: new Date(),
+    });
+    return true;
+  },
+
+  async releaseLock(conversationId) {
+    const existing = memoryGenerationStatus.get(conversationId);
+    if (existing) {
+      memoryGenerationStatus.set(conversationId, { ...existing, status: null });
+    }
+  },
+
+  async setCompleted(conversationId, { tempUserId, userMessageId, assistantMessageId }) {
+    memoryGenerationStatus.set(conversationId, {
+      status: 'completed',
+      error: null,
+      tempUserId: tempUserId || null,
+      userMessageId,
+      assistantMessageId,
+      updatedAt: new Date(),
+    });
+  },
+
+  // ⚠️ 同 DB 版：不得清掉 tempUserId，見上方說明。
+  async setFailed(conversationId, errorMessage) {
+    const existing = memoryGenerationStatus.get(conversationId) || {};
+    memoryGenerationStatus.set(conversationId, {
+      ...existing,
+      status: 'failed',
+      error: errorMessage,
+      updatedAt: new Date(),
+    });
+  },
+
+  async reset(conversationId) {
+    const existing = memoryGenerationStatus.get(conversationId);
+    if (existing) {
+      memoryGenerationStatus.set(conversationId, {
+        ...existing,
+        status: null,
+        error: null,
+        tempUserId: null,
+        userMessageId: null,
+        assistantMessageId: null,
+      });
+    }
+  },
+};
+
+export const generationStatusRepository = config.persistence?.enableGenerationStatus
+  ? dbGenerationStatusRepository
+  : memoryGenerationStatusRepository;
+
+// 供測試直接指定模式驗證兩套實作各自的行為，不需要透過 config 開關動態切換
+// （見 conversationRepository.test.js）。
+export { dbGenerationStatusRepository, memoryGenerationStatusRepository };
